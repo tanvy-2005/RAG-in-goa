@@ -1,0 +1,18 @@
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+__pycache__/
+*.pyc
+
+# Node / Frontend
+node_modules/
+dist/
+.env
+.env.local
+
+# Large Raw Datasets (not needed in production runtime if index is pre-built)
+*.parquet
+*.csv
+raw_data/
