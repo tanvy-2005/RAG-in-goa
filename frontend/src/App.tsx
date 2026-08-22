@@ -1,280 +1,379 @@
-import { useState, useEffect } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { ChatMessage } from './components/ChatMessage';
 import { ChatInput } from './components/ChatInput';
-import { Languages, FileAudio, Zap, ShieldCheck, Menu } from 'lucide-react';
-import type { Message, HistoryItem } from './types';
+import { BrainCircuit, Languages, FileAudio, Zap, Menu } from 'lucide-react';
+import type { Message, RAGResponse, HistoryItem } from './types';
 
-const rawUrl = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_API_BASE_URL)
-  ? import.meta.env.VITE_API_BASE_URL
-  : 'https://kidney-drivers-saving-phenomenon.trycloudflare.com';
-
-const API_BASE = String(rawUrl).replace(/\/$/, '');
+const API_BASE = 'http://127.0.0.1:8000/api';
 const LOCAL_STORAGE_KEY = 'indic_rag_chat_history';
 
-export default function App() {
+const DEFAULT_HISTORY: HistoryItem[] = [
+  {
+    id: "hist-1",
+    query: "கேள்வி: ஒரு நிறுவனம் என்பது என்ன?",
+    language: "ta",
+    timestamp: new Date(Date.now() - 500000).toISOString(),
+    answer: "ஒரு நிறுவனம் என்பது சட்டபூர்வமான தனி நபர் அந்தஸ்து கொண்ட அமைப்பாகும்.",
+    responsePayload: { query: "", language: "ta", answer: "", grounded: true, passages: [], latency_ms: 90, retrieval_ms: 15, passed_target_200ms: true, detected_language: "ta" }
+  },
+  {
+    id: "hist-2",
+    query: "ଏକ କର୍ପୋରେସନ୍ କ'ଣ?",
+    language: "or",
+    timestamp: new Date(Date.now() - 3600000).toISOString(),
+    answer: "କର୍ପୋରେସନ୍ ହେଉଛି ଏକ ବ୍ୟବସାୟିକ ସଂଗଠନ ଯାହା ଆଇନ ଅନୁଯାୟୀ ଏକ ସ୍ୱତନ୍ତ୍ର ବ୍ୟକ୍ତି ଭାବରେ ସ୍ୱୀକୃତିପ୍ରାପ୍ତ |",
+    responsePayload: { query: "", language: "or", answer: "", grounded: true, passages: [], latency_ms: 120, retrieval_ms: 22, passed_target_200ms: true, detected_language: "or" }
+  },
+  {
+    id: "hist-3",
+    query: "ഒരു കോർപ്പറേഷൻ എന്താണ്?",
+    language: "ml",
+    timestamp: new Date(Date.now() - 7200000).toISOString(),
+    answer: "നിയമപരമായി അംഗീകരിക്കപ്പെട്ട ഒരു കൂട്ടം വ്യക്തികളോ കമ്പനിയോ ഉൾപ്പെടുന്ന ഒരു സ്ഥാപനമാണ് കോർപ്പറേഷൻ.",
+    responsePayload: { query: "", language: "ml", answer: "", grounded: true, passages: [], latency_ms: 110, retrieval_ms: 18, passed_target_200ms: true, detected_language: "ml" }
+  },
+  {
+    id: "hist-4",
+    query: "किमुच्यते बर्टेली?",
+    language: "sa",
+    timestamp: new Date(Date.now() - 86400000).toISOString(),
+    answer: "बर्टेली इत्यस्य विषये अधिकं विवरणं न प्राप्तम्।",
+    responsePayload: { query: "", language: "sa", answer: "", grounded: false, passages: [], latency_ms: 105, retrieval_ms: 20, passed_target_200ms: true, detected_language: "sa" }
+  },
+  {
+    id: "hist-5",
+    query: "के हो निगम?",
+    language: "ne",
+    timestamp: new Date(Date.now() - 172800000).toISOString(),
+    transcribedText: "के हो निगम?",
+    answer: "निगम भनेको कानूनी रूपमा मान्यता प्राप्त एक व्यावसायिक संस्था हो।",
+    responsePayload: { query: "", language: "ne", answer: "", grounded: true, passages: [], latency_ms: 150, retrieval_ms: 30, passed_target_200ms: true, detected_language: "ne", audio_pipeline_total_ms: 1100 }
+  }
+];
+
+function App() {
   const [messages, setMessages] = useState<Message[]>([]);
-  const [loading, setLoading] = useState<boolean>(false);
-  const [sidebarOpen, setSidebarOpen] = useState<boolean>(false);
-  const [history, setHistory] = useState<HistoryItem[]>(() => {
-    try {
-      const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(history));
-    } catch (e) {
-      console.error(e);
+    const stored = localStorage.getItem(LOCAL_STORAGE_KEY);
+    if (stored) {
+      try {
+        setHistory(JSON.parse(stored));
+      } catch (e) {
+        setHistory(DEFAULT_HISTORY);
+        localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(DEFAULT_HISTORY));
+      }
+    } else {
+      setHistory(DEFAULT_HISTORY);
+      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(DEFAULT_HISTORY));
     }
-  }, [history]);
+  }, []);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
+  const saveToHistory = (item: HistoryItem) => {
+    const newHistory = [item, ...history];
+    setHistory(newHistory);
+    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(newHistory));
+  };
 
   const handleNewChat = () => {
     setMessages([]);
-    setSidebarOpen(false);
+    setIsMobileMenuOpen(false);
   };
 
-  const handleSendMessage = async (text: string, language: string = 'en', audioFile?: File) => {
-    if (!text.trim() && !audioFile) return;
+  const handleSelectHistory = (item: HistoryItem) => {
+    const userMsg: Message = {
+      id: item.id + '-user',
+      role: 'user',
+      content: item.query,
+      timestamp: new Date(item.timestamp),
+      isAudio: !!item.transcribedText,
+    };
+    const aiMsg: Message = {
+      id: item.id + '-ai',
+      role: 'assistant',
+      content: item.answer,
+      timestamp: new Date(item.timestamp),
+      passages: item.responsePayload.passages,
+      latencyMs: item.responsePayload.latency_ms,
+      retrievalMs: item.responsePayload.retrieval_ms,
+      audioPipelineMs: item.responsePayload.audio_pipeline_total_ms,
+      transcribedText: item.transcribedText || item.responsePayload.transcribed_text,
+      grounded: item.responsePayload.grounded,
+      passedTarget: item.responsePayload.passed_target_200ms,
+      detectedLanguage: item.responsePayload.detected_language || item.language,
+    };
+    setMessages([userMsg, aiMsg]);
+    setIsMobileMenuOpen(false);
+  };
 
-    const userMessage: Message = {
+  const handleClearHistory = () => {
+    setHistory([]);
+    localStorage.removeItem(LOCAL_STORAGE_KEY);
+  };
+
+  const handleSendText = async (text: string, language: string) => {
+    const userMsg: Message = {
       id: Date.now().toString(),
       role: 'user',
-      content: text || 'Voice Audio Query',
-      isAudio: !!audioFile,
-      timestamp: new Date().toISOString(),
+      content: text,
+      timestamp: new Date(),
     };
 
-    setMessages((prev) => [...prev, userMessage]);
-    setLoading(true);
+
+    setMessages(prev => [...prev, userMsg]);
+    setIsLoading(true);
 
     try {
-      const startTime = performance.now();
-      const res = await fetch(`${API_BASE}/query`, {
+      const res = await fetch(`${API_BASE}/ask`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: text, top_k: 5, source_language: language }),
+        body: JSON.stringify({ query: text, language }),
       });
 
-      if (!res.ok) throw new Error(`Server returned status ${res.status}`);
 
-      const data = await res.json();
-      const totalLatency = performance.now() - startTime;
+      const data: RAGResponse = await res.json();
 
-      const botAnswer = (data.results && data.results.length > 0)
-        ? (data.results[0].text || data.answer || "No matching passages found.")
-        : (data.answer || "No relevant documents found.");
 
-      const botMessage: Message = {
+      const aiMsg: Message = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        content: botAnswer,
-        timestamp: new Date().toISOString(),
-        latencyMs: Number(data.latency_ms || totalLatency),
-        retrievalMs: Number(data.retrieval_time_ms || totalLatency * 0.4),
-        passedTarget: (data.latency_ms || totalLatency) < 200,
-        grounded: data.grounded ?? true,
-        detectedLanguage: language,
-        passages: (data.results || []).map((r: any, idx: number) => ({
-          query_id: String(r.id || idx + 1),
-          text: String(r.text || ''),
-          language: String(r.language || language || 'en'),
-          score: Number(r.score || 0)
-        }))
+        content: data.answer,
+        timestamp: new Date(),
+        passages: data.passages,
+        latencyMs: data.latency_ms,
+        retrievalMs: data.retrieval_ms,
+        grounded: data.grounded,
+        passedTarget: data.passed_target_200ms,
+        detectedLanguage: data.detected_language || data.language || language,
       };
 
-      setMessages((prev) => [...prev, botMessage]);
 
-      const newHistoryItem: HistoryItem = {
+      setMessages(prev => [...prev, aiMsg]);
+
+      // Save to history
+      saveToHistory({
         id: Date.now().toString(),
-        query: text || 'Voice Audio Query',
-        language: language,
+        query: text,
+        language: data.detected_language || language,
         timestamp: new Date().toISOString(),
-        answer: botAnswer,
+        answer: data.answer,
         responsePayload: data
+      });
+
+    } catch (error) {
+      console.error(error);
+      const errorMsg: Message = {
+        id: (Date.now() + 1).toString(),
+        role: 'assistant',
+        content: "I encountered an error trying to connect to the server. Please try again.",
+        timestamp: new Date(),
+      };
+      setMessages(prev => [...prev, errorMsg]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleSendAudio = async (file: File, language: string) => {
+    const userMsg: Message = {
+      id: Date.now().toString(),
+      role: 'user',
+      content: 'Uploaded an audio file.',
+      timestamp: new Date(),
+      isAudio: true,
+    };
+
+
+    setMessages(prev => [...prev, userMsg]);
+    setIsLoading(true);
+
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('language', language);
+
+    try {
+      const res = await fetch(`${API_BASE}/voice-ask`, {
+        method: 'POST',
+        body: formData,
+      });
+
+
+      const data: RAGResponse = await res.json();
+
+
+      const aiMsg: Message = {
+        id: (Date.now() + 1).toString(),
+        role: 'assistant',
+        content: data.answer,
+        timestamp: new Date(),
+        passages: data.passages,
+        latencyMs: data.latency_ms,
+        retrievalMs: data.retrieval_ms,
+        audioPipelineMs: data.audio_pipeline_total_ms,
+        transcribedText: data.transcribed_text,
+        grounded: data.grounded,
+        passedTarget: data.passed_target_200ms,
+        detectedLanguage: data.detected_language || data.language || language,
       };
 
-      setHistory((prev) => [newHistoryItem, ...prev]);
-    } catch (err: any) {
-      console.error(err);
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: (Date.now() + 1).toString(),
-          role: 'assistant',
-          content: `Connection error: ${err.message || 'Check server status'}. Please ensure the backend is running.`,
-          timestamp: new Date().toISOString(),
-          grounded: false
-        }
-      ]);
+
+      setMessages(prev => [...prev, aiMsg]);
+
+      // Save to history
+      saveToHistory({
+        id: Date.now().toString(),
+        query: data.transcribed_text || "Audio File",
+        language: data.detected_language || language,
+        timestamp: new Date().toISOString(),
+        transcribedText: data.transcribed_text,
+        answer: data.answer,
+        responsePayload: data
+      });
+
+    } catch (error) {
+      console.error(error);
+      const errorMsg: Message = {
+        id: (Date.now() + 1).toString(),
+        role: 'assistant',
+        content: "I encountered an error trying to process the audio file. Please try again.",
+        timestamp: new Date(),
+      };
+      setMessages(prev => [...prev, errorMsg]);
     } finally {
-      setLoading(false);
+      setIsLoading(false);
     }
   };
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-[#030d09] text-slate-100 font-sans">
+    <div className="flex h-screen bg-[#05130c] font-sans overflow-hidden">
       <Sidebar
-        isOpen={sidebarOpen}
-        onClose={() => setSidebarOpen(false)}
+        isOpen={isMobileMenuOpen}
+        onClose={() => setIsMobileMenuOpen(false)}
         onNewChat={handleNewChat}
         history={history}
-        onSelectHistory={(item) => {
-          setMessages([
-            {
-              id: item.id,
-              role: 'user',
-              content: item.query || '',
-              timestamp: item.timestamp || new Date().toISOString(),
-            },
-            {
-              id: item.id + '-ans',
-              role: 'assistant',
-              content: item.answer || '',
-              timestamp: item.timestamp || new Date().toISOString(),
-              grounded: true,
-              passages: item?.responsePayload?.results || []
-            }
-          ]);
-          setSidebarOpen(false);
-        }}
-        onClearHistory={() => {
-          localStorage.removeItem(LOCAL_STORAGE_KEY);
-          setHistory([]);
-        }}
+        onSelectHistory={handleSelectHistory}
+        onClearHistory={handleClearHistory}
       />
 
-      <div className="flex-1 flex flex-col h-full relative overflow-hidden bg-[#030d09]">
-        {/* Mobile Header */}
-        <div className="lg:hidden h-14 border-b border-[#144731] flex items-center justify-between px-4 bg-[#06140e] shrink-0">
+
+      <main className="flex-1 flex flex-col relative">
+        {/* Mobile Top Navbar Header */}
+        <header className="lg:hidden flex items-center justify-between px-4 py-3 bg-[#06140e]/95 backdrop-blur-md border-b border-[#144731] z-30 flex-none sticky top-0">
+          {/* Left: Hamburger Menu Button */}
           <button
-            onClick={() => setSidebarOpen(true)}
-            className="p-2 rounded-lg text-emerald-400 hover:bg-[#0b2419]"
+            onClick={() => setIsMobileMenuOpen(true)}
+            className="p-2 rounded-lg text-emerald-400 hover:text-emerald-300 hover:bg-emerald-950/60 border border-emerald-800/40 transition-colors"
+            aria-label="Open sidebar"
           >
-            <Menu className="w-5 h-5" />
+            <Menu size={20} />
           </button>
-          <span className="font-bold text-sm tracking-wide">
-            RAG in <span className="text-[#FFDE00]">Goa</span>
-          </span>
-          <div className="w-8" />
-        </div>
 
-        {/* Chat / Hero Body Area */}
-        <div className="flex-1 overflow-y-auto p-4 md:p-8 custom-scrollbar">
+          {/* Center: Branding */}
+          <div className="flex items-center gap-2">
+            <img src="/hero.png" alt="Logo" className="w-7 h-7 rounded-full object-cover" />
+            <span className="text-sm font-bold text-white tracking-wide font-sans">
+              RAG in <span className="text-[#FFDE00]">Goa</span>
+            </span>
+          </div>
+
+          {/* Right: Invisible Spacer to Keep Center Logo Perfectly Balanced */}
+          <div className="w-9 h-9 opacity-0 pointer-events-none" aria-hidden="true" />
+        </header>
+
+        {/* Message Feed */}
+        <div className="flex-1 overflow-y-auto custom-scrollbar scroll-smooth">
           {messages.length === 0 ? (
-            <div className="h-full flex flex-col items-center justify-center max-w-4xl mx-auto text-center px-4 py-8">
+            <div className="flex flex-col items-center min-h-full px-4 pt-8 text-center max-w-3xl mx-auto pb-64">
+              <div className="flex flex-col items-center justify-center text-center max-w-2xl mx-auto mt-auto pb-2 mb-10">
+                {/* Compact Constrained Logo Badge */}
+                <div className="flex-shrink-0 w-16 h-16 md:w-20 md:h-20 rounded-full overflow-hidden flex items-center justify-center mb-4 transition-transform hover:scale-105 duration-200">
+                  <img src="/hero.png" alt="RAG in Goa Logo" className="w-full h-full object-cover rounded-full" />
+                </div>
 
-              {/* Circular Hero Logo */}
-              <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-full overflow-hidden mb-6 border-2 border-[#144731] shadow-2xl flex items-center justify-center bg-[#06140e]">
-                <img
-                  src="/hero.png"
-                  alt="RAG in Goa"
-                  className="w-full h-full object-cover"
-                  onError={(e) => {
-                    (e.currentTarget as HTMLElement).style.display = 'none';
-                  }}
-                />
+
+                {/* Typography */}
+                <h2 className="text-2xl md:text-3xl font-bold text-white tracking-tight font-sans mb-3">
+                  Welcome to the <span className="text-[#FFDE00] drop-shadow-[0_0_12px_rgba(255,222,0,0.25)]">RAG Platform</span>
+                </h2>
+                <p className="text-xs md:text-sm text-slate-400 max-w-lg leading-relaxed font-sans">
+                  A cutting-edge Retrieval-Augmented Generation engine supporting 14 Indic languages and English. Ask via text or voice, and get grounded, sub-200ms responses.
+                </p>
               </div>
-
-              {/* Title & Subtitle */}
-              <h1 className="text-2xl sm:text-4xl font-bold text-white tracking-tight mb-3">
-                Welcome to the <span className="text-[#FFDE00]">RAG Platform</span>
-              </h1>
-              <p className="text-xs sm:text-sm text-gray-400 max-w-2xl leading-relaxed mb-10">
-                A cutting-edge Retrieval-Augmented Generation engine supporting 14 Indic languages and English. Ask via text or voice, and get grounded, sub-200ms responses.
-              </p>
-
-              {/* 4 Feature Cards */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full max-w-3xl mb-8">
-
-                <div className="flex items-start gap-4 p-4 rounded-xl border border-[#144731] bg-[#06140e]/60 text-left hover:border-emerald-700/60 transition-colors">
-                  <div className="p-2.5 rounded-lg bg-[#0b2419] border border-[#144731] text-[#FFDE00] shrink-0">
-                    <Languages className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-semibold text-white mb-1">Multilingual Querying</h3>
-                    <p className="text-xs text-gray-400 leading-relaxed">
-                      You can ask questions in 14 Indic languages and English.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-start gap-4 p-4 rounded-xl border border-[#144731] bg-[#06140e]/60 text-left hover:border-emerald-700/60 transition-colors">
-                  <div className="p-2.5 rounded-lg bg-[#0b2419] border border-[#144731] text-[#FFDE00] shrink-0">
-                    <FileAudio className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-semibold text-white mb-1">Voice & Audio Input</h3>
-                    <p className="text-xs text-gray-400 leading-relaxed">
-                      Speak naturally or upload an MP3 to get started.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-start gap-4 p-4 rounded-xl border border-[#144731] bg-[#06140e]/60 text-left hover:border-emerald-700/60 transition-colors">
-                  <div className="p-2.5 rounded-lg bg-[#0b2419] border border-[#144731] text-[#FFDE00] shrink-0">
-                    <Zap className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-semibold text-white mb-1">Ultra-Low Latency</h3>
-                    <p className="text-xs text-gray-400 leading-relaxed">
-                      Experience RAG inference optimized for &lt; 200ms.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-start gap-4 p-4 rounded-xl border border-[#144731] bg-[#06140e]/60 text-left hover:border-emerald-700/60 transition-colors">
-                  <div className="p-2.5 rounded-lg bg-[#0b2419] border border-[#144731] text-[#FFDE00] shrink-0">
-                    <ShieldCheck className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-semibold text-white mb-1">Verified Grounding</h3>
-                    <p className="text-xs text-gray-400 leading-relaxed">
-                      Every answer is cited back to the semantic FAISS index.
-                    </p>
-                  </div>
-                </div>
-
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4 max-w-3xl mx-auto w-full px-2 sm:px-0 mb-auto">
+                {[
+                  { icon: <Languages className="w-5 h-5" />, title: "Multilingual Querying", desc: "You can ask questions in 14 Indic languages and English.", iconBg: "bg-[#FFDE00]/10 border-[#FFDE00]/30 text-[#FFDE00]", hover: "hover:border-[#FFDE00]/60 hover:shadow-[0_0_20px_rgba(255,222,0,0.08)]" },
+                  { icon: <FileAudio className="w-5 h-5" />, title: "Voice & Audio Input", desc: "Speak naturally or upload an MP3 to get started.", iconBg: "bg-[#FFDE00]/10 border-[#FFDE00]/30 text-[#FFDE00]", hover: "hover:border-[#FFDE00]/60 hover:shadow-[0_0_20px_rgba(255,222,0,0.08)]" },
+                  { icon: <Zap className="w-5 h-5" />, title: "Ultra-Low Latency", desc: "Experience RAG inference optimized for < 200ms.", iconBg: "bg-[#FFDE00]/10 border-[#FFDE00]/30 text-[#FFDE00]", hover: "hover:border-[#FFDE00]/60 hover:shadow-[0_0_20px_rgba(255,222,0,0.08)]" },
+                  { icon: <BrainCircuit className="w-5 h-5" />, title: "Verified Grounding", desc: "Every answer is cited back to the semantic FAISS index.", iconBg: "bg-[#FFDE00]/10 border-[#FFDE00]/30 text-[#FFDE00]", hover: "hover:border-[#FFDE00]/60 hover:shadow-[0_0_20px_rgba(255,222,0,0.08)]" }
+                ].map((card, i) => (
+                  <button key={i} className={`flex items-start gap-4 p-4 rounded-xl bg-[#0b2419]/70 hover:bg-[#0e2f21]/80 border border-[#144731] transition-all duration-200 shadow-sm group text-left ${card.hover}`}>
+                    <div className={`p-2.5 rounded-lg border transition-colors flex-shrink-0 ${card.iconBg}`}>
+                      {card.icon}
+                    </div>
+                    <div className="flex flex-col space-y-1">
+                      <h3 className="text-sm font-semibold text-slate-100 tracking-wide">{card.title}</h3>
+                      <p className="text-xs text-slate-400 font-normal leading-relaxed">{card.desc}</p>
+                    </div>
+                  </button>
+                ))}
               </div>
-
             </div>
           ) : (
-            <div className="max-w-4xl mx-auto space-y-6">
-              {messages.map((msg) => (
+            <div className="w-full max-w-4xl 2xl:max-w-5xl mx-auto px-3 sm:px-6 lg:px-8 pt-8 pb-40 sm:pb-48 lg:pb-52">
+              {messages.map(msg => (
                 <ChatMessage key={msg.id} message={msg} />
               ))}
-              {loading && (
-                <div className="flex items-center gap-3 text-emerald-400 text-xs italic pl-2">
-                  <div className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-                  Retrieving grounded context from FAISS vector store...
-                </div>
-              )}
+              <div ref={messagesEndRef} />
             </div>
           )}
         </div>
 
-        {/* Chat Input & Footer Section */}
-        <div className="p-4 bg-[#030d09] border-t border-[#144731]/60 shrink-0">
-          <div className="max-w-4xl mx-auto flex flex-col gap-3">
-            <ChatInput onSendMessage={handleSendMessage} disabled={loading} apiBase={API_BASE} />
+        {/* Bottom Sticky/Fixed Dock Area */}
+        <div className="absolute bottom-0 left-0 w-full pointer-events-none flex flex-col items-center bg-gradient-to-t from-[#05130c] via-[#05130c]/95 to-transparent pt-12">
 
-            <p className="text-[11px] text-center text-gray-500">
+
+          {/* 1. Floating Input Capsule */}
+          <div className="w-full pointer-events-auto">
+            <ChatInput
+              onSendText={handleSendText}
+              onSendAudio={handleSendAudio}
+              isLoading={isLoading}
+            />
+          </div>
+
+          {/* 2. Guardrails Disclaimer - Perfectly Centered Between Input & Footer */}
+          <div className="w-full py-3 flex items-center justify-center pointer-events-auto">
+            <p className="text-slate-400/80 text-[10px] sm:text-xs text-center leading-relaxed max-w-4xl px-6 select-none">
               Responses are strictly grounded in the indexed multilingual dataset. Queries outside the dataset corpus are rejected by grounding guardrails.
             </p>
           </div>
-        </div>
 
-        {/* Footer Hackathon Banner */}
-        <footer className="h-10 bg-[#06140e] border-t border-[#144731] flex items-center justify-center px-4 shrink-0">
-          <p className="text-[11px] font-semibold tracking-wider text-[#FFDE00] uppercase font-mono">
-            HACKER HOUSE GOA 2026 • HHGOA.COM • 2:47PM STUDIO
-          </p>
-        </footer>
-      </div>
+          {/* 3. Hacker House Goa Footer */}
+          <footer className="w-full py-3 bg-[#082c1b] border-t border-[#144731] flex flex-col items-center justify-center space-y-1 text-center font-sans z-10 pointer-events-auto">
+            <div className="text-[#FFDE00] font-bold tracking-widest text-xs uppercase drop-shadow-sm">
+              HACKER HOUSE GOA 2026
+            </div>
+            <div className="text-[#34d399] text-[10px] sm:text-[11px] font-medium tracking-wider uppercase opacity-90">
+              HHGOA.COM • OCT 28–31, 2026 • 2:47PM STUDIO
+            </div>
+          </footer>
+        </div>
+      </main>
     </div>
   );
 }
+
+export default App;
