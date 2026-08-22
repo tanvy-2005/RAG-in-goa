@@ -1,8 +1,8 @@
-import React, { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { ChatMessage } from './components/ChatMessage';
 import { ChatInput } from './components/ChatInput';
-import { BrainCircuit, Languages, FileAudio, Zap, Menu, MessageSquarePlus, Plus } from 'lucide-react';
+import { BrainCircuit, Languages, FileAudio, Zap, Menu } from 'lucide-react';
 import type { Message, RAGResponse, HistoryItem } from './types';
 
 const API_BASE = 'http://127.0.0.1:8000/api';

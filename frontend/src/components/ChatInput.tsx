@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Mic, ArrowUp, Paperclip, Globe, X, Square, Loader2 } from 'lucide-react';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
+import { Select, SelectContent, SelectItem, SelectTrigger } from './ui/select';
 import { TooltipProvider, ActionTooltip } from './ui/tooltip';
 import { LANGUAGES } from '../types';
 import type { LanguageOption } from '../types';
@@ -19,7 +19,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onSendText, onSendAudio, i
   const [recordingTime, setRecordingTime] = useState(0);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -111,13 +111,6 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onSendText, onSendAudio, i
     } else if (text.trim()) {
       onSendText(text.trim(), language);
       setText('');
-    }
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSubmit();
     }
   };
 

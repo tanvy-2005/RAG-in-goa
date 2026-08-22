@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { Clock, CheckCircle2, AlertTriangle, ShieldCheck, ShieldAlert, ChevronDown, ChevronUp, FileText } from 'lucide-react';
-import type { QueryResponse } from '../types';
+import { CheckCircle2, AlertTriangle, ShieldCheck, ShieldAlert, ChevronDown, ChevronUp, FileText } from 'lucide-react';
+import type { RAGResponse } from '../types';
 
 const LANGUAGE_FULL_NAMES: Record<string, string> = {
   en: "English",
@@ -27,7 +27,7 @@ const getLanguageFullName = (code?: string) => {
 };
 
 interface MetricCardProps {
-  response: QueryResponse;
+  response: RAGResponse;
 }
 
 export const MetricCard: React.FC<MetricCardProps> = ({ response }) => {
@@ -127,7 +127,7 @@ export const MetricCard: React.FC<MetricCardProps> = ({ response }) => {
           
           {showPassages && (
             <div className="mt-4 space-y-3">
-              {response.passages?.map((p, idx) => (
+              {response.passages?.map((p: any, idx: number) => (
                 <div key={idx} className="bg-[#06140e] p-4 rounded-lg border border-[#144731]">
                   <div className="flex justify-between items-center mb-2">
                     <span className="text-xs bg-[#0b2419] border border-[#144731] text-emerald-300 px-2 py-1 rounded">

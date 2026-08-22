@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
-import { User, BrainCircuit, Mic, FileAudio, ShieldCheck, ShieldAlert, ChevronDown, ChevronUp, Copy, Volume2, ThumbsUp, ThumbsDown, FileText } from 'lucide-react';
+import { Mic, FileAudio, ShieldCheck, ShieldAlert, ChevronDown, ChevronUp, FileText } from 'lucide-react';
 import type { Message } from '../types';
-import heroImage from '../assets/hero.png';
 
 const LANGUAGE_FULL_NAMES: Record<string, string> = {
   en: "English",

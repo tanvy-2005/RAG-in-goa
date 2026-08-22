@@ -4,8 +4,6 @@ import json
 import re
 import pyarrow.parquet as pq
 from huggingface_hub import hf_hub_download
-
-# Mapping of all 13 Indic languages to validation paths
 LANG_FILES = {
     "bn": "validation/benval.parquet",
     "ta": "validation/tamval.parquet",
