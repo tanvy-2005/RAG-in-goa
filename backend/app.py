@@ -3,7 +3,6 @@ import time
 import json
 import re
 import linecache
-import gc
 import torch
 import numpy as np
 import faiss
@@ -15,7 +14,7 @@ from typing import List, Optional
 from transformers import AutoTokenizer, AutoModel
 
 # ============================================================
-# 1. RUNTIME CONFIGURATION (LOW RAM & FAST CPU INFERENCE)
+# 1. RUNTIME CONFIGURATION (<200ms TARGET, LOW MEMORY)
 # ============================================================
 torch.set_num_threads(1)
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -43,7 +42,7 @@ app.add_middleware(
 # 2. LOAD FAISS INDEX & ON-DEMAND METADATA (LOW RAM)
 # ============================================================
 print("=" * 60)
-print("INITIALIZING MULTILINGUAL INDIC RAG ENGINE (LOW-MEMORY OPTIMIZED)")
+print("INITIALIZING MULTILINGUAL INDIC RAG ENGINE (OPTIMIZED)")
 print("=" * 60)
 
 if not os.path.exists(INDEX_FILE) or not os.path.exists(METADATA_FILE):
@@ -58,7 +57,7 @@ total_vectors = index.ntotal
 print(f"Total Vectors Indexed: {total_vectors:,}")
 
 def get_metadata_by_id(doc_idx: int) -> dict:
-    """Fetches metadata on-demand from disk without retaining all records in RAM."""
+    """Fetches metadata on-demand from disk without retaining 45,000 JSON records in RAM."""
     if doc_idx < 0 or doc_idx >= total_vectors:
         return {}
     line = linecache.getline(METADATA_FILE, doc_idx + 1)
@@ -69,33 +68,27 @@ def get_metadata_by_id(doc_idx: int) -> dict:
             return {}
     return {}
 
-print(f"Loading Embedding Model (Dynamic Quantized): {MODEL_NAME}...")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-raw_model = AutoModel.from_pretrained(MODEL_NAME, torch_dtype=torch.float32)
-
-# Dynamic quantization cuts PyTorch model memory footprint by ~60%
-model = torch.quantization.quantize_dynamic(raw_model, {torch.nn.Linear}, dtype=torch.qint8)
+print(f"Loading Embedding Model: {MODEL_NAME}...")
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, use_fast=True)
+model = AutoModel.from_pretrained(MODEL_NAME, dtype=torch.float32, low_cpu_mem_usage=True)
 model.eval()
-del raw_model
-gc.collect()
 
 def encode_query(text: str) -> np.ndarray:
-    """Encodes query to normalized e5 embeddings with minimal memory allocation."""
+    """Encodes query to normalized e5 embeddings cleanly and efficiently."""
     formatted_query = f"query: {text}"
     inputs = tokenizer(formatted_query, return_tensors="pt", max_length=128, padding=True, truncation=True)
     with torch.inference_mode():
         outputs = model(**inputs)
-        # Average pooling
         mask = inputs["attention_mask"].unsqueeze(-1).expand(outputs.last_hidden_state.size()).float()
         sum_embeddings = torch.sum(outputs.last_hidden_state * mask, 1)
         sum_mask = torch.clamp(mask.sum(1), min=1e-9)
         mean_pooled = sum_embeddings / sum_mask
-        # Normalize
         normalized = torch.nn.functional.normalize(mean_pooled, p=2, dim=1)
         return normalized.cpu().numpy().astype("float32")
 
 # Warmup run
-_ = encode_query("warmup")
+with torch.inference_mode():
+    _ = encode_query("warmup")
 print("System Warmup Complete. Pipeline Ready!\n")
 
 
