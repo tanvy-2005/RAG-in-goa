@@ -39,10 +39,10 @@ app.add_middleware(
 )
 
 # ============================================================
-# 2. LOAD FAISS INDEX & ON-DEMAND METADATA (LOW RAM)
+# 2. LOAD FAISS INDEX & LAZY LOAD METADATA / EMBEDDINGS
 # ============================================================
 print("=" * 60)
-print("INITIALIZING MULTILINGUAL INDIC RAG ENGINE (OPTIMIZED)")
+print("INITIALIZING MULTILINGUAL INDIC RAG ENGINE (STABLE BOOT)")
 print("=" * 60)
 
 if not os.path.exists(INDEX_FILE) or not os.path.exists(METADATA_FILE):
@@ -56,6 +56,9 @@ index = faiss.read_index(INDEX_FILE)
 total_vectors = index.ntotal
 print(f"Total Vectors Indexed: {total_vectors:,}")
 
+tokenizer = None
+model = None
+
 def get_metadata_by_id(doc_idx: int) -> dict:
     """Fetches metadata on-demand from disk without retaining 45,000 JSON records in RAM."""
     if doc_idx < 0 or doc_idx >= total_vectors:
@@ -68,17 +71,23 @@ def get_metadata_by_id(doc_idx: int) -> dict:
             return {}
     return {}
 
-print(f"Loading Embedding Model: {MODEL_NAME}...")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, use_fast=True)
-model = AutoModel.from_pretrained(MODEL_NAME, dtype=torch.float32, low_cpu_mem_usage=True)
-model.eval()
+def get_embedder():
+    """Initializes tokenizer and model lazily on first request to prevent boot timeouts."""
+    global tokenizer, model
+    if tokenizer is None or model is None:
+        print(f"Loading Embedding Model on demand: {MODEL_NAME}...")
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, use_fast=True)
+        model = AutoModel.from_pretrained(MODEL_NAME, low_cpu_mem_usage=True)
+        model.eval()
+    return tokenizer, model
 
 def encode_query(text: str) -> np.ndarray:
     """Encodes query to normalized e5 embeddings cleanly and efficiently."""
+    tok, mdl = get_embedder()
     formatted_query = f"query: {text}"
-    inputs = tokenizer(formatted_query, return_tensors="pt", max_length=128, padding=True, truncation=True)
+    inputs = tok(formatted_query, return_tensors="pt", max_length=128, padding=True, truncation=True)
     with torch.inference_mode():
-        outputs = model(**inputs)
+        outputs = mdl(**inputs)
         mask = inputs["attention_mask"].unsqueeze(-1).expand(outputs.last_hidden_state.size()).float()
         sum_embeddings = torch.sum(outputs.last_hidden_state * mask, 1)
         sum_mask = torch.clamp(mask.sum(1), min=1e-9)
@@ -86,10 +95,7 @@ def encode_query(text: str) -> np.ndarray:
         normalized = torch.nn.functional.normalize(mean_pooled, p=2, dim=1)
         return normalized.cpu().numpy().astype("float32")
 
-# Warmup run
-with torch.inference_mode():
-    _ = encode_query("warmup")
-print("System Warmup Complete. Pipeline Ready!\n")
+print("Port Binding Ready. Pipeline Initialized!\n")
 
 
 # ============================================================
