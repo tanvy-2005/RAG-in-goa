@@ -68,7 +68,6 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({ message }) => {
             alt="RAG in Goa"
             className="w-full h-full object-cover rounded-full"
             onError={(e) => {
-              // Fallback placeholder if image fails
               (e.currentTarget as HTMLElement).style.display = 'none';
             }}
           />
