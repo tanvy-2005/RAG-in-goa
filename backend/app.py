@@ -9,15 +9,12 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
-from transformers import AutoTokenizer, AutoModel
-import torch
+from transformers import AutoTokenizer
+from optimum.onnxruntime import ORTModelForFeatureExtraction
 
 # ============================================================
 # 1. RUNTIME CONFIGURATION (<200ms TARGET)
 # ============================================================
-torch.set_num_threads(2)
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "sk_8x94884j_MrW1uKlHhyOVd3Qf4tAhxopU")
 INDEX_FILE = os.path.join(os.path.dirname(__file__), "multilingual.index")
 METADATA_FILE = os.path.join(os.path.dirname(__file__), "multilingual_metadata.jsonl")
@@ -26,7 +23,7 @@ MODEL_NAME = "intfloat/multilingual-e5-small"
 app = FastAPI(
     title="Voice-Enabled Multilingual Indic RAG Harness",
     description="Sub-200ms 14-Language Indic Vector Search, Sarvam STT & Strict Grounding Guardrail Engine",
-    version="15.0"
+    version="16.0"
 )
 
 app.add_middleware(
@@ -38,10 +35,10 @@ app.add_middleware(
 )
 
 # ============================================================
-# 2. FAST ON-DISK SEEK INDEXING & LOW-RAM MODEL
+# 2. FAST ON-DISK SEEK INDEXING & ONNX MODEL (ZERO PYTORCH)
 # ============================================================
 print("=" * 60)
-print("INITIALIZING MULTILINGUAL INDIC RAG ENGINE")
+print("INITIALIZING MULTILINGUAL INDIC RAG ENGINE (ONNX RUNTIME)")
 print("=" * 60)
 
 if not os.path.exists(INDEX_FILE) or not os.path.exists(METADATA_FILE):
@@ -55,8 +52,7 @@ index = faiss.read_index(INDEX_FILE)
 total_vectors = index.ntotal
 print(f"Total Vectors Indexed: {total_vectors:,}")
 
-# Build lightweight in-memory byte offset table (<400 KB RAM) for instant O(1) disk retrieval
-print("Building seek table for instant document lookups...")
+print("Building seek table for document lookups...")
 doc_offsets = []
 with open(METADATA_FILE, "rb") as f:
     offset = 0
@@ -65,7 +61,6 @@ with open(METADATA_FILE, "rb") as f:
         offset += len(line)
 
 def get_metadata_by_id(doc_idx: int) -> dict:
-    """Reads target document directly via byte-seek in <0.2ms with zero RAM consumption."""
     if 0 <= doc_idx < len(doc_offsets):
         with open(METADATA_FILE, "rb") as f:
             f.seek(doc_offsets[doc_idx])
@@ -77,24 +72,25 @@ def get_metadata_by_id(doc_idx: int) -> dict:
                     return {}
     return {}
 
-print(f"Loading Quantized Neural Model: {MODEL_NAME}...")
+print(f"Loading ONNX Model: {MODEL_NAME}...")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, use_fast=True)
-model = AutoModel.from_pretrained(MODEL_NAME, low_cpu_mem_usage=True)
-model.eval()
+ort_model = ORTModelForFeatureExtraction.from_pretrained(MODEL_NAME, export=True)
 
 def encode_query(text: str) -> np.ndarray:
-    """Encodes query into native 384d semantic vector space."""
-    inputs = tokenizer(f"query: {text}", return_tensors="pt", max_length=128, padding=True, truncation=True)
-    with torch.inference_mode():
-        outputs = model(**inputs)
-        mask = inputs["attention_mask"].unsqueeze(-1).expand(outputs.last_hidden_state.size()).float()
-        sum_embeddings = torch.sum(outputs.last_hidden_state * mask, 1)
-        sum_mask = torch.clamp(mask.sum(1), min=1e-9)
-        mean_pooled = sum_embeddings / sum_mask
-        normalized = torch.nn.functional.normalize(mean_pooled, p=2, dim=1)
-        return normalized.cpu().numpy().astype("float32")
+    """Encodes query into native 384d semantic vector space using ONNX."""
+    inputs = tokenizer(f"query: {text}", return_tensors="np", max_length=128, padding=True, truncation=True)
+    outputs = ort_model(**inputs)
+    last_hidden_state = outputs.last_hidden_state  # shape: (1, seq_len, 384)
+    attention_mask = np.expand_dims(inputs["attention_mask"], axis=-1)
+    
+    sum_embeddings = np.sum(last_hidden_state * attention_mask, axis=1)
+    sum_mask = np.clip(attention_mask.sum(axis=1), a_min=1e-9, a_max=None)
+    mean_pooled = sum_embeddings / sum_mask
+    
+    norm = np.linalg.norm(mean_pooled, axis=1, keepdims=True)
+    norm[norm == 0] = 1.0
+    return (mean_pooled / norm).astype("float32")
 
-# Warmup run
 _ = encode_query("warmup query")
 print("System Warmup Complete. Pipeline Ready!\n")
 
