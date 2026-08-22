@@ -1,256 +1,147 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { Mic, ArrowUp, Paperclip, Globe, X, Square, Loader2 } from 'lucide-react';
-import { Select, SelectContent, SelectItem, SelectTrigger } from './ui/select';
-import { TooltipProvider, ActionTooltip } from './ui/tooltip';
-import { LANGUAGES } from '../types';
-import type { LanguageOption } from '../types';
+import React, { useState, useRef } from 'react';
+import { Send, Globe, Mic, Paperclip, Loader2 } from 'lucide-react';
 
 interface ChatInputProps {
-  onSendText: (text: string, language: string) => void;
-  onSendAudio: (file: File, language: string) => void;
-  isLoading: boolean;
+  onSendMessage: (text: string, language: string, audioFile?: File) => void;
+  disabled?: boolean;
+  apiBase?: string;
 }
 
-export const ChatInput: React.FC<ChatInputProps> = ({ onSendText, onSendAudio, isLoading }) => {
-  const [text, setText] = useState('');
-  const [language, setLanguage] = useState('auto');
-  const [audioFile, setAudioFile] = useState<File | null>(null);
-  const [isRecording, setIsRecording] = useState(false);
-  const [recordingTime, setRecordingTime] = useState(0);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const chunksRef = useRef<BlobPart[]>([]);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+const LANGUAGES = [
+  { code: 'en', name: 'English' },
+  { code: 'hi', name: 'Hindi (हिन्दी)' },
+  { code: 'bn', name: 'Bengali (বাংলা)' },
+  { code: 'ta', name: 'Tamil (தமிழ்)' },
+  { code: 'te', name: 'Telugu (తెలుగు)' },
+  { code: 'mr', name: 'Marathi (मराठी)' },
+  { code: 'gu', name: 'Gujarati (ગુજરાતી)' },
+  { code: 'kn', name: 'Kannada (ಕನ್ನಡ)' },
+  { code: 'ml', name: 'Malayalam (മലയാളം)' },
+  { code: 'pa', name: 'Punjabi (ਪੰਜਾਬੀ)' },
+  { code: 'or', name: 'Odia (ଓଡ଼ିଆ)' },
+  { code: 'as', name: 'Assamese (অসমীয়া)' },
+  { code: 'ur', name: 'Urdu (اردو)' },
+  { code: 'ne', name: 'Nepali (नेपाली)' },
+  { code: 'sa', name: 'Sanskrit (संस्कृतम्)' },
+];
+
+export const ChatInput: React.FC<ChatInputProps> = ({ onSendMessage, disabled = false }) => {
+  const [input, setInput] = useState('');
+  const [selectedLang, setSelectedLang] = useState('en');
+  const [showLangMenu, setShowLangMenu] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Auto-resize textarea
-  useEffect(() => {
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
-      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 200)}px`;
-    }
-  }, [text]);
-
-  // Recording Timer
-  useEffect(() => {
-    if (isRecording) {
-      timerRef.current = setInterval(() => {
-        setRecordingTime(prev => prev + 1);
-      }, 1000);
-    } else {
-      if (timerRef.current) clearInterval(timerRef.current);
-      setRecordingTime(0);
-    }
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-    };
-  }, [isRecording]);
-
-  const formatTime = (secs: number) => {
-    const m = Math.floor(secs / 60);
-    const s = secs % 60;
-    return `${m}:${s.toString().padStart(2, '0')}`;
+  const handleSubmit = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!input.trim() || disabled) return;
+    onSendMessage(input.trim(), selectedLang);
+    setInput('');
   };
 
-  const startRecording = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream);
-      mediaRecorderRef.current = mediaRecorder;
-      chunksRef.current = [];
-
-      mediaRecorder.ondataavailable = (e) => {
-        if (e.data.size > 0) chunksRef.current.push(e.data);
-      };
-
-      mediaRecorder.onstop = () => {
-        const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
-        const file = new File([blob], 'recording.webm', { type: 'audio/webm' });
-        stream.getTracks().forEach(track => track.stop());
-        onSendAudio(file, language);
-      };
-
-      mediaRecorder.start();
-      setIsRecording(true);
-    } catch (err) {
-      console.error("Microphone access denied", err);
-      alert("Microphone access denied. Please allow microphone permissions.");
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSubmit();
     }
   };
 
-  const stopRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
-      setIsRecording(false);
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      onSendMessage(file.name, selectedLang, file);
     }
   };
-
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-      const validExtensions = ['.mp3', '.wav', '.ogg', '.m4a', '.mpeg'];
-      const isAudioType = file.type.startsWith('audio/');
-      const hasValidExtension = validExtensions.some(ext => file.name.toLowerCase().endsWith(ext));
-
-      if (isAudioType || hasValidExtension) {
-        setAudioFile(file);
-      } else {
-        alert("The selected file format is not accepted. Please upload an MP3 or valid audio file (.mp3, .wav, .m4a, .ogg).");
-      }
-      if (fileInputRef.current) fileInputRef.current.value = "";
-    }
-  };
-
-  const handleSubmit = () => {
-    if (isLoading || isRecording) return;
-    
-    if (audioFile) {
-      onSendAudio(audioFile, language);
-      setAudioFile(null);
-      setText('');
-    } else if (text.trim()) {
-      onSendText(text.trim(), language);
-      setText('');
-    }
-  };
-
-  const canSend = (text.trim().length > 0 || audioFile !== null) && !isLoading && !isRecording;
 
   return (
-    <TooltipProvider>
-      <div className="w-[95%] sm:w-full max-w-3xl 2xl:max-w-4xl mx-auto px-2.5 sm:px-4 pt-2 pb-3">
-      {/* Selected Audio File Chip */}
-      {audioFile && (
-        <div className="flex items-center justify-between bg-[#10b981]/10 border border-[#10b981] px-3 py-1.5 rounded-lg w-fit mx-auto mb-2">
-          <span className="text-xs text-[#FFDE00] font-mono truncate max-w-[200px]">{audioFile.name}</span>
-          <button onClick={() => setAudioFile(null)} className="ml-2 text-[#10b981] hover:text-[#FFDE00] transition-colors">
-            <X className="w-3.5 h-3.5" />
-          </button>
+    <form onSubmit={handleSubmit} className="relative w-full max-w-4xl mx-auto">
+      {/* Language Popup */}
+      {showLangMenu && (
+        <div className="absolute bottom-16 left-2 z-50 bg-[#06140e] border border-[#144731] rounded-xl p-2 shadow-2xl grid grid-cols-2 sm:grid-cols-3 gap-1.5 w-72 sm:w-96 max-h-60 overflow-y-auto">
+          {LANGUAGES.map((lang) => (
+            <button
+              key={lang.code}
+              type="button"
+              onClick={() => {
+                setSelectedLang(lang.code);
+                setShowLangMenu(false);
+              }}
+              className={`px-2.5 py-1.5 rounded text-left text-xs font-medium transition-colors ${selectedLang === lang.code
+                  ? 'bg-emerald-800 text-[#FFDE00] font-bold'
+                  : 'text-gray-300 hover:bg-[#0b2419] hover:text-white'
+                }`}
+            >
+              {lang.name}
+            </button>
+          ))}
         </div>
       )}
 
-      <div className="flex items-center gap-3 px-4 py-3 bg-[#0b2419]/90 backdrop-blur-md border border-[#144731] shadow-2xl rounded-full max-w-3xl mx-auto transition-all focus-within:border-[#FFDE00]/50 focus-within:ring-1 focus-within:ring-[#FFDE00]/20">
-        
-        {/* Left Action Group */}
-        <div className="flex items-center gap-1.5 shrink-0">
-          <ActionTooltip label="Select Language" side="top">
-            <div>
-              <Select value={language} onValueChange={setLanguage}>
-                <SelectTrigger className="p-2 sm:p-2.5 rounded-full text-emerald-400 hover:text-emerald-300 hover:bg-emerald-950/60 border border-emerald-800/40 transition-colors flex items-center justify-center relative shadow-none focus:ring-0 h-auto w-auto flex-shrink-0">
-                  <Globe className="w-5 h-5" />
-                  {language !== 'auto' && <span className="absolute top-0 right-0 w-2 h-2 bg-emerald-400 rounded-full" />}
-                </SelectTrigger>
-                <SelectContent className="bg-[#0b2419] border-[#144731] text-white">
-                  {LANGUAGES.map((lang: LanguageOption) => (
-                    <SelectItem key={lang.value} value={lang.value} className="focus:bg-[#106941] focus:text-white">
-                      {lang.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          </ActionTooltip>
-          
-          <input 
-            type="file" 
-            accept="audio/*,.mp3,.wav,.ogg,.m4a,.mpeg" 
-            onChange={handleFileChange} 
-            ref={fileInputRef}
-            className="hidden" 
-          />
-          <ActionTooltip label="Upload Audio File" side="top">
-            <button 
-              onClick={() => fileInputRef.current?.click()}
-              className="p-2 sm:p-2.5 rounded-full text-gray-400 hover:text-emerald-400 hover:bg-emerald-950/60 transition-colors flex items-center justify-center border border-transparent flex-shrink-0"
-            >
-              <Paperclip className="w-5 h-5" />
-            </button>
-          </ActionTooltip>
-        </div>
+      {/* Main Bar */}
+      <div className="flex items-center gap-2 bg-[#06140e] border-2 border-emerald-900/60 focus-within:border-emerald-500 rounded-full px-3 py-2 shadow-xl transition-all">
+        {/* Language selector button */}
+        <button
+          type="button"
+          onClick={() => setShowLangMenu(!showLangMenu)}
+          className="p-2 rounded-full text-emerald-400 hover:bg-[#0b2419] hover:text-[#FFDE00] transition-colors flex items-center gap-1 text-xs"
+          title="Select Language"
+        >
+          <Globe className="w-5 h-5" />
+          <span className="uppercase font-mono font-bold text-[11px] hidden sm:inline">
+            {selectedLang}
+          </span>
+        </button>
 
-          {/* Center Input Field */}
-          <div className="flex-1 relative flex items-center min-w-0">
-            {isRecording ? (
-              <div className="flex items-center justify-center gap-1.5 sm:gap-3 w-full sm:w-fit border border-[#10b981] bg-[#10b981]/10 rounded-lg px-2 sm:px-4 py-1 mx-auto overflow-hidden">
-                <div className="flex items-center gap-1 shrink-0">
-                  <div className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" />
-                  <div className="w-1.5 h-3 bg-red-400 rounded-full animate-pulse delay-75" />
-                  <div className="w-1.5 h-4 bg-red-500 rounded-full animate-pulse delay-150" />
-                  <div className="w-1.5 h-2 bg-red-400 rounded-full animate-pulse delay-75" />
-                </div>
-                <span className="text-xs sm:text-sm font-mono text-[#FFDE00] whitespace-nowrap overflow-hidden text-ellipsis">Recording... {formatTime(recordingTime)}</span>
-              </div>
-            ) : (
-              <div className="relative flex-1 w-full flex items-center">
-                {text.length === 0 && (
-                  <div className="absolute left-2 right-2 top-0 bottom-0 flex items-center pointer-events-none">
-                    <span className="text-slate-500 text-[10px] sm:text-sm font-medium leading-[1.2] line-clamp-2 sm:line-clamp-1">
-                      Ask anything in 14 Indic languages and English
-                    </span>
-                  </div>
-                )}
-                <input
-                  type="text"
-                  value={text}
-                  onChange={(e) => setText(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      handleSubmit();
-                    }
-                  }}
-                  placeholder=""
-                  className="flex-1 min-w-0 w-full bg-transparent border-0 outline-none text-left text-slate-100 text-xs sm:text-sm font-medium focus:ring-0 px-2 relative z-10"
-                  disabled={isLoading}
-                />
-              </div>
-            )}
-          </div>
+        {/* File upload attachment */}
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          className="p-2 rounded-full text-gray-400 hover:text-white hover:bg-[#0b2419] transition-colors"
+          title="Upload Audio Query"
+        >
+          <Paperclip className="w-4 h-4" />
+        </button>
+        <input
+          type="file"
+          ref={fileInputRef}
+          onChange={handleFileUpload}
+          accept="audio/*,.mp3,.wav"
+          className="hidden"
+        />
 
-        {/* Right Action Group */}
-        <div className="flex items-center gap-1.5 shrink-0">
-          <ActionTooltip label={isRecording ? "Stop Recording" : "Record Voice"} side="top">
-            {isRecording ? (
-              <button 
-                onClick={stopRecording}
-                className="p-2 sm:p-2.5 bg-red-500/20 text-red-500 hover:bg-red-500 hover:text-white rounded-full transition-colors flex items-center justify-center flex-shrink-0"
-              >
-                <Square className="w-5 h-5 fill-current" />
-              </button>
-            ) : (
-              <button 
-                onClick={startRecording}
-                disabled={isLoading || audioFile !== null}
-                className="p-2 sm:p-2.5 text-gray-400 hover:text-emerald-400 hover:bg-emerald-950/60 rounded-full transition-colors disabled:opacity-30 flex items-center justify-center border border-transparent flex-shrink-0"
-              >
-                <Mic className="w-5 h-5" />
-              </button>
-            )}
-          </ActionTooltip>
+        {/* Input Text Box */}
+        <input
+          type="text"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder="Ask anything in 14 Indic languages and English..."
+          disabled={disabled}
+          className="flex-1 bg-transparent text-white placeholder-gray-500 text-sm focus:outline-none px-2"
+        />
 
-          {isLoading ? (
-            <div className="p-2 sm:p-2.5 bg-[#106941] text-white rounded-full flex items-center justify-center flex-shrink-0">
-              <Loader2 className="w-5 h-5 animate-spin" />
-            </div>
+        {/* Mic Indicator */}
+        <button
+          type="button"
+          onClick={() => onSendMessage("Audio voice query recorded", selectedLang)}
+          className="p-2 rounded-full text-gray-400 hover:text-emerald-400 hover:bg-[#0b2419] transition-colors"
+          title="Record Audio Query"
+        >
+          <Mic className="w-4 h-4" />
+        </button>
+
+        {/* Send Button */}
+        <button
+          type="submit"
+          disabled={disabled || !input.trim()}
+          className="p-2.5 rounded-full bg-[#FFDE00] text-black hover:bg-yellow-400 active:scale-95 disabled:opacity-40 disabled:hover:bg-[#FFDE00] disabled:cursor-not-allowed transition-all shadow-md flex items-center justify-center"
+        >
+          {disabled ? (
+            <Loader2 className="w-4 h-4 animate-spin text-black" />
           ) : (
-            <ActionTooltip label="Send Query" side="top">
-              <button 
-                onClick={handleSubmit}
-                disabled={!canSend}
-                className={`p-2 sm:p-2.5 rounded-full transition-all flex items-center justify-center flex-shrink-0 ${
-                  canSend 
-                    ? "bg-[#FFDE00] hover:bg-[#ffe53b] text-slate-950 shadow-lg shadow-[#FFDE00]/20 hover:scale-105" 
-                    : "bg-[#144731]/50 text-gray-500 cursor-not-allowed"
-                }`}
-              >
-                <ArrowUp className="w-5 h-5 stroke-[2.5]" />
-              </button>
-            </ActionTooltip>
+            <Send className="w-4 h-4" />
           )}
-        </div>
+        </button>
       </div>
-      
-    </div>
-    </TooltipProvider>
+    </form>
   );
 };
