@@ -5,7 +5,11 @@ import { ChatInput } from './components/ChatInput';
 import { BrainCircuit, Languages, FileAudio, Zap, Menu } from 'lucide-react';
 import type { Message, RAGResponse, HistoryItem } from './types';
 
-const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '');
+const rawUrl = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_API_BASE_URL)
+  ? import.meta.env.VITE_API_BASE_URL
+  : 'http://127.0.0.1:8000';
+
+const API_BASE = String(rawUrl).replace(/\/$/, '');
 const LOCAL_STORAGE_KEY = 'indic_rag_chat_history';
 
 const DEFAULT_HISTORY: HistoryItem[] = [
