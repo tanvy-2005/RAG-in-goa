@@ -2,6 +2,7 @@ import os
 import time
 import json
 import re
+import linecache
 import torch
 import numpy as np
 import faiss
@@ -15,11 +16,11 @@ from sentence_transformers import SentenceTransformer
 # ============================================================
 # 1. RUNTIME CONFIGURATION (<200ms TARGET)
 # ============================================================
-torch.set_num_threads(4)
+torch.set_num_threads(1)
 
-SARVAM_API_KEY = "sk_8x94884j_MrW1uKlHhyOVd3Qf4tAhxopU"
-INDEX_FILE = "multilingual.index"
-METADATA_FILE = "multilingual_metadata.jsonl"
+SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "sk_8x94884j_MrW1uKlHhyOVd3Qf4tAhxopU")
+INDEX_FILE = os.path.join(os.path.dirname(__file__), "multilingual.index")
+METADATA_FILE = os.path.join(os.path.dirname(__file__), "multilingual_metadata.jsonl")
 MODEL_NAME = "intfloat/multilingual-e5-small"
 
 app = FastAPI(
@@ -37,33 +38,42 @@ app.add_middleware(
 )
 
 # ============================================================
-# 2. LOAD FAISS INDEX & METADATA
+# 2. LOAD FAISS INDEX & ON-DEMAND METADATA (LOW RAM)
 # ============================================================
 print("=" * 60)
-print("INITIALIZING MULTILINGUAL INDIC RAG ENGINE")
+print("INITIALIZING MULTILINGUAL INDIC RAG ENGINE (LOW-MEMORY OPTIMIZED)")
 print("=" * 60)
 
 if not os.path.exists(INDEX_FILE) or not os.path.exists(METADATA_FILE):
-    raise FileNotFoundError("Index or metadata file missing.")
+    # Fallback to local working directory if relative path fails
+    INDEX_FILE = "multilingual.index"
+    METADATA_FILE = "multilingual_metadata.jsonl"
+    if not os.path.exists(INDEX_FILE) or not os.path.exists(METADATA_FILE):
+        raise FileNotFoundError("multilingual.index or multilingual_metadata.jsonl missing.")
 
 print(f"Loading FAISS Index from {INDEX_FILE}...")
 index = faiss.read_index(INDEX_FILE)
-print(f"Total Vectors Indexed: {index.ntotal:,}")
+total_vectors = index.ntotal
+print(f"Total Vectors Indexed: {total_vectors:,}")
 
-print(f"Loading Metadata from {METADATA_FILE}...")
-metadata = []
-with open(METADATA_FILE, "r", encoding="utf-8") as f:
-    for line in f:
-        if line.strip():
-            metadata.append(json.loads(line))
-print(f"Total Metadata Records: {len(metadata):,}")
+def get_metadata_by_id(doc_idx: int) -> dict:
+    """Fetches metadata on-demand from disk without retaining all records in RAM."""
+    if doc_idx < 0 or doc_idx >= total_vectors:
+        return {}
+    # linecache is 1-indexed
+    line = linecache.getline(METADATA_FILE, doc_idx + 1)
+    if line and line.strip():
+        try:
+            return json.loads(line)
+        except Exception:
+            return {}
+    return {}
 
 print(f"Loading Embedding Model: {MODEL_NAME}...")
 embed_model = SentenceTransformer(MODEL_NAME)
 
-for _ in range(2):
-    with torch.inference_mode():
-        _ = embed_model.encode(["query: warmup"], normalize_embeddings=True, convert_to_numpy=True)
+with torch.inference_mode():
+    _ = embed_model.encode(["query: warmup"], normalize_embeddings=True, convert_to_numpy=True)
 print("System Warmup Complete. Pipeline Ready!\n")
 
 
@@ -220,7 +230,6 @@ def passage_matches_query_context(query: str, text: str, score: float) -> bool:
     
     q_tokens = [w for w in clean_q.split() if w not in stopwords and len(w) >= 3]
     
-    # Require lexical/stem containment if score is in borderline range
     if score < 0.86 and q_tokens:
         return any(token in clean_p for token in q_tokens)
         
@@ -276,13 +285,15 @@ def retrieve_passages(query: str, top_k: int = 3, target_lang: Optional[str] = N
     valid_results = []
 
     for score, idx in zip(scores[0], indices[0]):
-        if 0 <= idx < len(metadata):
-            doc = metadata[idx]
+        if 0 <= idx < total_vectors:
+            doc = get_metadata_by_id(int(idx))
+            if not doc:
+                continue
+
             doc_lang = str(doc.get("language", "")).strip().lower()
             doc_text = doc.get("text", "").strip()
             
             if doc_lang == effective_lang:
-                # Eliminate noisy crawl negatives and ungrounded passages
                 if not passage_matches_query_context(query, doc_text, float(score)):
                     continue
 
@@ -368,7 +379,6 @@ async def process_voice_query(
     sarvam_lang_code = SARVAM_BCP47_MAP.get(resolved_hint, "unknown") if resolved_hint else "unknown"
 
     transcript = ""
-    stt_detected_lang = "unknown"
     
     try:
         url = "https://api.sarvam.ai/speech-to-text"
@@ -381,7 +391,6 @@ async def process_voice_query(
         if res.status_code == 200:
             resp_json = res.json()
             transcript = resp_json.get("transcript", "").strip()
-            stt_detected_lang = resp_json.get("language_code", "unknown")
             print(f"[Sarvam STT] File: '{orig_filename}' | Sent Lang: {sarvam_lang_code} | Transcribed: '{transcript}'")
         else:
             print(f"[Sarvam STT Error] {res.text}")
