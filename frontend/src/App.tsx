@@ -5,7 +5,7 @@ import { ChatInput } from './components/ChatInput';
 import { BrainCircuit, Languages, FileAudio, Zap, Menu } from 'lucide-react';
 import type { Message, RAGResponse, HistoryItem } from './types';
 
-const API_BASE = 'http://127.0.0.1:8000/api';
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '');
 const LOCAL_STORAGE_KEY = 'indic_rag_chat_history';
 
 const DEFAULT_HISTORY: HistoryItem[] = [
@@ -131,7 +131,7 @@ function App() {
       content: text,
       timestamp: new Date(),
     };
-    
+
     setMessages(prev => [...prev, userMsg]);
     setIsLoading(true);
 
@@ -141,9 +141,9 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: text, language }),
       });
-      
+
       const data: RAGResponse = await res.json();
-      
+
       const aiMsg: Message = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
@@ -156,7 +156,7 @@ function App() {
         passedTarget: data.passed_target_200ms,
         detectedLanguage: data.detected_language || data.language || language,
       };
-      
+
       setMessages(prev => [...prev, aiMsg]);
 
       // Save to history
@@ -191,7 +191,7 @@ function App() {
       timestamp: new Date(),
       isAudio: true,
     };
-    
+
     setMessages(prev => [...prev, userMsg]);
     setIsLoading(true);
 
@@ -204,9 +204,9 @@ function App() {
         method: 'POST',
         body: formData,
       });
-      
+
       const data: RAGResponse = await res.json();
-      
+
       const aiMsg: Message = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
@@ -221,7 +221,7 @@ function App() {
         passedTarget: data.passed_target_200ms,
         detectedLanguage: data.detected_language || data.language || language,
       };
-      
+
       setMessages(prev => [...prev, aiMsg]);
 
       // Save to history
@@ -251,15 +251,15 @@ function App() {
 
   return (
     <div className="flex h-screen bg-[#05130c] font-sans overflow-hidden">
-      <Sidebar 
+      <Sidebar
         isOpen={isMobileMenuOpen}
         onClose={() => setIsMobileMenuOpen(false)}
-        onNewChat={handleNewChat} 
+        onNewChat={handleNewChat}
         history={history}
         onSelectHistory={handleSelectHistory}
         onClearHistory={handleClearHistory}
       />
-      
+
       <main className="flex-1 flex flex-col relative">
         {/* Mobile Top Navbar Header */}
         <header className="lg:hidden flex items-center justify-between px-4 py-3 bg-[#06140e]/95 backdrop-blur-md border-b border-[#144731] z-30 flex-none sticky top-0">
@@ -293,7 +293,7 @@ function App() {
                 <div className="flex-shrink-0 w-16 h-16 md:w-20 md:h-20 rounded-full overflow-hidden flex items-center justify-center mb-4 transition-transform hover:scale-105 duration-200">
                   <img src="/hero.png" alt="RAG in Goa Logo" className="w-full h-full object-cover rounded-full" />
                 </div>
-              
+
                 {/* Typography */}
                 <h2 className="text-2xl md:text-3xl font-bold text-white tracking-tight font-sans mb-3">
                   Welcome to the <span className="text-[#FFDE00] drop-shadow-[0_0_12px_rgba(255,222,0,0.25)]">RAG Platform</span>
@@ -333,13 +333,13 @@ function App() {
 
         {/* Bottom Sticky/Fixed Dock Area */}
         <div className="absolute bottom-0 left-0 w-full pointer-events-none flex flex-col items-center bg-gradient-to-t from-[#05130c] via-[#05130c]/95 to-transparent pt-12">
-          
+
           {/* 1. Floating Input Capsule */}
           <div className="w-full pointer-events-auto">
-            <ChatInput 
-              onSendText={handleSendText} 
-              onSendAudio={handleSendAudio} 
-              isLoading={isLoading} 
+            <ChatInput
+              onSendText={handleSendText}
+              onSendAudio={handleSendAudio}
+              isLoading={isLoading}
             />
           </div>
 
