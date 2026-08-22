@@ -3,6 +3,7 @@ import time
 import json
 import re
 import linecache
+import gc
 import torch
 import numpy as np
 import faiss
@@ -11,12 +12,13 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
-from sentence_transformers import SentenceTransformer
+from transformers import AutoTokenizer, AutoModel
 
 # ============================================================
-# 1. RUNTIME CONFIGURATION (<200ms TARGET)
+# 1. RUNTIME CONFIGURATION (LOW RAM & FAST CPU INFERENCE)
 # ============================================================
 torch.set_num_threads(1)
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "sk_8x94884j_MrW1uKlHhyOVd3Qf4tAhxopU")
 INDEX_FILE = os.path.join(os.path.dirname(__file__), "multilingual.index")
@@ -45,7 +47,6 @@ print("INITIALIZING MULTILINGUAL INDIC RAG ENGINE (LOW-MEMORY OPTIMIZED)")
 print("=" * 60)
 
 if not os.path.exists(INDEX_FILE) or not os.path.exists(METADATA_FILE):
-    # Fallback to local working directory if relative path fails
     INDEX_FILE = "multilingual.index"
     METADATA_FILE = "multilingual_metadata.jsonl"
     if not os.path.exists(INDEX_FILE) or not os.path.exists(METADATA_FILE):
@@ -60,7 +61,6 @@ def get_metadata_by_id(doc_idx: int) -> dict:
     """Fetches metadata on-demand from disk without retaining all records in RAM."""
     if doc_idx < 0 or doc_idx >= total_vectors:
         return {}
-    # linecache is 1-indexed
     line = linecache.getline(METADATA_FILE, doc_idx + 1)
     if line and line.strip():
         try:
@@ -69,11 +69,33 @@ def get_metadata_by_id(doc_idx: int) -> dict:
             return {}
     return {}
 
-print(f"Loading Embedding Model: {MODEL_NAME}...")
-embed_model = SentenceTransformer(MODEL_NAME)
+print(f"Loading Embedding Model (Dynamic Quantized): {MODEL_NAME}...")
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+raw_model = AutoModel.from_pretrained(MODEL_NAME, torch_dtype=torch.float32)
 
-with torch.inference_mode():
-    _ = embed_model.encode(["query: warmup"], normalize_embeddings=True, convert_to_numpy=True)
+# Dynamic quantization cuts PyTorch model memory footprint by ~60%
+model = torch.quantization.quantize_dynamic(raw_model, {torch.nn.Linear}, dtype=torch.qint8)
+model.eval()
+del raw_model
+gc.collect()
+
+def encode_query(text: str) -> np.ndarray:
+    """Encodes query to normalized e5 embeddings with minimal memory allocation."""
+    formatted_query = f"query: {text}"
+    inputs = tokenizer(formatted_query, return_tensors="pt", max_length=128, padding=True, truncation=True)
+    with torch.inference_mode():
+        outputs = model(**inputs)
+        # Average pooling
+        mask = inputs["attention_mask"].unsqueeze(-1).expand(outputs.last_hidden_state.size()).float()
+        sum_embeddings = torch.sum(outputs.last_hidden_state * mask, 1)
+        sum_mask = torch.clamp(mask.sum(1), min=1e-9)
+        mean_pooled = sum_embeddings / sum_mask
+        # Normalize
+        normalized = torch.nn.functional.normalize(mean_pooled, p=2, dim=1)
+        return normalized.cpu().numpy().astype("float32")
+
+# Warmup run
+_ = encode_query("warmup")
 print("System Warmup Complete. Pipeline Ready!\n")
 
 
@@ -81,58 +103,22 @@ print("System Warmup Complete. Pipeline Ready!\n")
 # 3. LANGUAGE CODE ALIASES & SCRIPT CLASSIFIER
 # ============================================================
 LANG_ALIASES = {
-    "od": "or",
-    "ori": "or",
-    "odia": "or",
-    "oriya": "or",
-    "tam": "ta",
-    "tamil": "ta",
-    "tel": "te",
-    "telugu": "te",
-    "kan": "kn",
-    "kannada": "kn",
-    "mal": "ml",
-    "malayalam": "ml",
-    "ben": "bn",
-    "bengali": "bn",
-    "bangla": "bn",
-    "asm": "as",
-    "assamese": "as",
-    "asamiya": "as",
-    "guj": "gu",
-    "gujarati": "gu",
-    "pan": "pa",
-    "punjabi": "pa",
-    "urd": "ur",
-    "urdu": "ur",
-    "hin": "hi",
-    "hindi": "hi",
-    "mar": "mr",
-    "marathi": "mr",
-    "nep": "ne",
-    "nepali": "ne",
-    "san": "sa",
-    "sanskrit": "sa",
-    "eng": "en",
-    "english": "en",
+    "od": "or", "ori": "or", "odia": "or", "oriya": "or",
+    "tam": "ta", "tamil": "ta", "tel": "te", "telugu": "te",
+    "kan": "kn", "kannada": "kn", "mal": "ml", "malayalam": "ml",
+    "ben": "bn", "bengali": "bn", "bangla": "bn", "asm": "as",
+    "assamese": "as", "asamiya": "as", "guj": "gu", "gujarati": "gu",
+    "pan": "pa", "punjabi": "pa", "urd": "ur", "urdu": "ur",
+    "hin": "hi", "hindi": "hi", "mar": "mr", "marathi": "mr",
+    "nep": "ne", "nepali": "ne", "san": "sa", "sanskrit": "sa",
+    "eng": "en", "english": "en"
 }
 
 SARVAM_BCP47_MAP = {
-    "hi": "hi-IN",
-    "bn": "bn-IN",
-    "ta": "ta-IN",
-    "te": "te-IN",
-    "ml": "ml-IN",
-    "mr": "mr-IN",
-    "gu": "gu-IN",
-    "kn": "kn-IN",
-    "pa": "pa-IN",
-    "or": "od-IN",
-    "as": "as-IN",
-    "ur": "ur-IN",
-    "ne": "ne-IN",
-    "sa": "sa-IN",
-    "en": "en-IN",
+    "hi": "hi-IN", "bn": "bn-IN", "ta": "ta-IN", "te": "te-IN",
+    "ml": "ml-IN", "mr": "mr-IN", "gu": "gu-IN", "kn": "kn-IN",
+    "pa": "pa-IN", "or": "od-IN", "as": "as-IN", "ur": "ur-IN",
+    "ne": "ne-IN", "sa": "sa-IN", "en": "en-IN"
 }
 
 def normalize_lang_code(code: Optional[str]) -> Optional[str]:
@@ -272,13 +258,7 @@ def retrieve_passages(query: str, top_k: int = 3, target_lang: Optional[str] = N
     t0 = time.perf_counter()
     effective_lang = classify_indic_language(query, target_lang)
 
-    with torch.inference_mode():
-        q_emb = embed_model.encode(
-            [f"query: {query}"],
-            normalize_embeddings=True,
-            convert_to_numpy=True
-        ).astype("float32")
-
+    q_emb = encode_query(query)
     scores, indices = index.search(q_emb, min(100, index.ntotal))
     retrieval_time_ms = (time.perf_counter() - t0) * 1000.0
 
