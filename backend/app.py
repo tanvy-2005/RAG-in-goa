@@ -5,27 +5,29 @@ import re
 import numpy as np
 import faiss
 import requests
+import torch
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
+from transformers import AutoTokenizer, AutoModel
 
 # ============================================================
-# 1. RUNTIME CONFIGURATION (HF MODEL + MEAN POOLING)
+# 1. RUNTIME CONFIGURATION (LOCAL EMBEDDER - NO EXTERNAL API)
 # ============================================================
+torch.set_num_threads(1)
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["OMP_NUM_THREADS"] = "1"
+
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "sk_8x94884j_MrW1uKlHhyOVd3Qf4tAhxopU")
-HF_TOKEN = os.getenv("HF_TOKEN", "")
-
 INDEX_FILE = os.path.join(os.path.dirname(__file__), "multilingual.index")
 METADATA_FILE = os.path.join(os.path.dirname(__file__), "multilingual_metadata.jsonl")
-
-HF_MODEL_NAME = "intfloat/multilingual-e5-small"
-HF_API_URL = f"https://api-inference.huggingface.co/pipeline/feature-extraction/{HF_MODEL_NAME}"
+MODEL_NAME = "intfloat/multilingual-e5-small"
 
 app = FastAPI(
     title="Voice-Enabled Multilingual Indic RAG Harness",
-    description="Sub-200ms Indic Neural RAG with Hugging Face Model Integration",
-    version="36.0"
+    description="Sub-100ms Native Neural Indic Vector Search Engine",
+    version="37.0"
 )
 
 app.add_middleware(
@@ -36,13 +38,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-http_session = requests.Session()
-
 # ============================================================
-# 2. LOAD FAISS INDEX & FAST DISK MAP
+# 2. LOAD FAISS INDEX, DISK MAP & TRANSFORMER MODEL
 # ============================================================
 print("=" * 60)
-print(f"INITIALIZING INDIC RAG ENGINE WITH HF MODEL: {HF_MODEL_NAME}")
+print(f"INITIALIZING MULTILINGUAL INDIC NEURAL RAG ENGINE")
 print("=" * 60)
 
 if not os.path.exists(INDEX_FILE) or not os.path.exists(METADATA_FILE):
@@ -82,52 +82,31 @@ def get_metadata_by_id(doc_idx: int) -> dict:
                     return {}
     return {}
 
+print(f"Loading Neural Embedding Model: {MODEL_NAME}...")
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, use_fast=True)
+embed_model = AutoModel.from_pretrained(MODEL_NAME, low_cpu_mem_usage=True)
+embed_model.eval()
 
-# ============================================================
-# 3. ROBUST HF INFERENCE EMBEDDER WITH SHAPE NORMALIZATION
-# ============================================================
-def encode_with_hf_model(query_text: str) -> Optional[np.ndarray]:
-    """Generates normalized 384d semantic vectors from HF Feature Extraction."""
-    token = os.getenv("HF_TOKEN", HF_TOKEN).strip()
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-    
-    # Must use 'query: ' prefix for e5 embeddings
-    payload = {
-        "inputs": f"query: {query_text.strip()}",
-        "options": {"wait_for_model": True, "use_cache": True}
-    }
-    
-    try:
-        res = http_session.post(HF_API_URL, headers=headers, json=payload, timeout=5.0)
-        if res.status_code == 200:
-            data = res.json()
-            raw_emb = np.array(data, dtype="float32")
-            
-            # Case A: (seq_len, 384) -> Mean pool to (1, 384)
-            if raw_emb.ndim == 2:
-                emb = np.mean(raw_emb, axis=0, keepdims=True)
-            # Case B: (1, seq_len, 384) -> Mean pool to (1, 384)
-            elif raw_emb.ndim == 3:
-                emb = np.mean(raw_emb, axis=1)
-            # Case C: (384,) -> Reshape to (1, 384)
-            elif raw_emb.ndim == 1:
-                emb = np.expand_dims(raw_emb, axis=0)
-            else:
-                return None
+def encode_query(query_text: str) -> np.ndarray:
+    """Exact multilingual-e5 embeddings computed locally with zero API latency."""
+    formatted = f"query: {query_text.strip()}"
+    inputs = tokenizer(formatted, return_tensors="pt", max_length=128, padding=True, truncation=True)
+    with torch.inference_mode():
+        outputs = embed_model(**inputs)
+        mask = inputs["attention_mask"].unsqueeze(-1).expand(outputs.last_hidden_state.size()).float()
+        sum_embeddings = torch.sum(outputs.last_hidden_state * mask, 1)
+        sum_mask = torch.clamp(mask.sum(1), min=1e-9)
+        mean_pooled = sum_embeddings / sum_mask
+        normalized = torch.nn.functional.normalize(mean_pooled, p=2, dim=1)
+        return normalized.cpu().numpy().astype("float32")
 
-            # Cosine normalization matching FAISS IndexFlatIP / L2
-            norm = np.linalg.norm(emb, axis=1, keepdims=True)
-            norm[norm == 0] = 1.0
-            return (emb / norm).astype("float32")
-        else:
-            print(f"[HF Status {res.status_code}] {res.text[:120]}")
-    except Exception as e:
-        print(f"[HF Exception] {e}")
-    return None
+# Warmup run
+_ = encode_query("warmup")
+print("Neural Engine Initialized and Warmup Complete!\n")
 
 
 # ============================================================
-# 4. INDIC SCRIPT CLASSIFIER
+# 3. INDIC SCRIPT CLASSIFIER
 # ============================================================
 LANG_ALIASES = {
     "od": "or", "ori": "or", "odia": "or", "oriya": "or",
@@ -187,57 +166,56 @@ def classify_indic_language(text: str, hint_lang: Optional[str] = None) -> str:
 
 
 # ============================================================
-# 5. SEMANTIC FAISS RETRIEVAL
+# 4. VECTOR RETRIEVAL ENGINE
 # ============================================================
 def retrieve_passages(query: str, top_k: int = 3, target_lang: Optional[str] = None):
     t0 = time.perf_counter()
     effective_lang = classify_indic_language(query, target_lang)
 
-    q_emb = encode_with_hf_model(query)
-    results = []
+    q_emb = encode_query(query)
+    scores, indices = index.search(q_emb, min(100, index.ntotal))
 
-    if q_emb is not None:
-        scores, indices = index.search(q_emb, min(100, index.ntotal))
+    results = []
+    for score, idx in zip(scores[0], indices[0]):
+        if 0 <= idx < total_vectors:
+            doc = get_metadata_by_id(int(idx))
+            if not doc:
+                continue
+            doc_lang = str(doc.get("language", "")).strip().lower()
+            if doc_lang == effective_lang:
+                results.append({
+                    "score": round(float(score), 4),
+                    "language": doc_lang,
+                    "query_id": doc.get("query_id"),
+                    "text": doc.get("text", "")
+                })
+                if len(results) >= top_k:
+                    break
+
+    # Fallback to top global matches if language tag is broad
+    if not results:
         for score, idx in zip(scores[0], indices[0]):
             if 0 <= idx < total_vectors:
                 doc = get_metadata_by_id(int(idx))
-                if not doc:
-                    continue
-                doc_lang = str(doc.get("language", "")).strip().lower()
-                if doc_lang == effective_lang:
+                if doc:
                     results.append({
                         "score": round(float(score), 4),
-                        "language": doc_lang,
+                        "language": str(doc.get("language", effective_lang)),
                         "query_id": doc.get("query_id"),
                         "text": doc.get("text", "")
                     })
                     if len(results) >= top_k:
                         break
 
-        # Fallback to top global matches if language tag is broad
-        if not results:
-            for score, idx in zip(scores[0], indices[0]):
-                if 0 <= idx < total_vectors:
-                    doc = get_metadata_by_id(int(idx))
-                    if doc:
-                        results.append({
-                            "score": round(float(score), 4),
-                            "language": str(doc.get("language", effective_lang)),
-                            "query_id": doc.get("query_id"),
-                            "text": doc.get("text", "")
-                        })
-                        if len(results) >= top_k:
-                            break
-
     results.sort(key=lambda x: x["score"], reverse=True)
     final_passages = results[:top_k]
     ret_time = (time.perf_counter() - t0) * 1000.0
-    print(f"[Neural RAG] Query: '{query[:30]}' | Matches: {len(final_passages)} | Latency: {ret_time:.2f}ms")
+    print(f"[Neural RAG] Query: '{query[:30]}' | Lang: {effective_lang.upper()} | Matches: {len(final_passages)} | Latency: {ret_time:.2f}ms")
     return final_passages, ret_time, effective_lang
 
 
 # ============================================================
-# 6. FASTAPI ENDPOINTS
+# 5. FASTAPI ENDPOINTS
 # ============================================================
 class QueryRequest(BaseModel):
     query: str
@@ -248,8 +226,6 @@ def health_check():
     return {
         "status": "online",
         "service": "Voice-Enabled Multilingual Indic RAG Harness",
-        "hf_model": HF_MODEL_NAME,
-        "hf_token_configured": bool(os.getenv("HF_TOKEN")),
         "vectors_indexed": index.ntotal,
         "docs_url": "/docs"
     }
@@ -260,7 +236,8 @@ def process_text_query(req: QueryRequest):
     passages, ret_time, matched_lang = retrieve_passages(req.query, top_k=3, target_lang=req.language)
     total_time = (time.perf_counter() - t_start) * 1000.0
 
-    if not passages or passages[0]["score"] < 0.60:
+    # Minimum threshold to filter out unrelated queries
+    if not passages or passages[0]["score"] < 0.50:
         return {
             "query": req.query,
             "language": matched_lang,
