@@ -17,14 +17,12 @@ SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "sk_8x94884j_MrW1uKlHhyOVd3Qf4tAhxo
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 INDEX_FILE = os.path.join(os.path.dirname(__file__), "multilingual.index")
 METADATA_FILE = os.path.join(os.path.dirname(__file__), "multilingual_metadata.jsonl")
-
-# Direct Hugging Face Inference API endpoint
 HF_API_URL = "https://router.huggingface.co/hf-inference/models/intfloat/multilingual-e5-small"
 
 app = FastAPI(
     title="Voice-Enabled Multilingual Indic RAG Harness",
-    description="Sub-100ms 14-Language Indic Vector Search & STT Pipeline",
-    version="23.0"
+    description="Fast Multilingual Indic FAISS Retrieval Engine with Relevance Re-Ranking",
+    version="24.0"
 )
 
 app.add_middleware(
@@ -119,7 +117,8 @@ SARVAM_BCP47_MAP = {
 }
 
 def normalize_lang_code(code: Optional[str]) -> Optional[str]:
-    if not code: return None
+    if not code:
+        return None
     c = code.strip().lower().split("-")[0].split("_")[0]
     return LANG_ALIASES.get(c, c)
 
@@ -157,7 +156,7 @@ def classify_indic_language(text: str, hint_lang: Optional[str] = None) -> str:
 
 
 # ============================================================
-# 4. HYBRID FAISS + EXACT LEXICAL RETRIEVAL ENGINE
+# 4. HYBRID FAISS + EXACT LEXICAL RETRIEVAL (RANK-SORTED)
 # ============================================================
 STOPWORDS = {
     "what", "is", "a", "an", "the", "how", "fast", "does", "in", "to", "of", "and", "or", "for",
@@ -177,31 +176,38 @@ def retrieve_passages(query: str, top_k: int = 3, target_lang: Optional[str] = N
     q_emb = encode_query(query)
     results = []
 
-    # Branch 1: FAISS Semantic Retrieval if embedding succeeded
+    # Branch 1: Semantic FAISS Retrieval
     if q_emb is not None:
         scores, indices = index.search(q_emb, min(100, index.ntotal))
         for score, idx in zip(scores[0], indices[0]):
             if 0 <= idx < total_vectors:
                 doc = get_metadata_by_id(int(idx))
-                if not doc: continue
+                if not doc:
+                    continue
                 doc_lang = str(doc.get("language", "")).strip().lower()
                 if doc_lang == effective_lang:
+                    doc_text = doc.get("text", "")
+                    doc_text_lower = doc_text.lower()
+                    
+                    matched_keywords = sum(1 for t in q_tokens if t in doc_text_lower)
+                    keyword_bonus = matched_keywords * 0.25
+                    adjusted_score = float(score) + keyword_bonus
+                    
                     results.append({
-                        "score": float(score),
+                        "score": round(adjusted_score, 4),
                         "language": doc_lang,
                         "query_id": doc.get("query_id"),
-                        "text": doc.get("text", "")
+                        "text": doc_text
                     })
-                    if len(results) >= top_k:
-                        break
 
-    # Branch 2: High-speed exact Lexical Scan if offline or 0 semantic matches
+    # Branch 2: High-speed Lexical Search fallback
     if not results and q_tokens:
         with open(METADATA_FILE, "rb") as f:
             for offset in doc_offsets:
                 f.seek(offset)
                 line = f.readline().decode("utf-8", errors="ignore")
-                if not line.strip(): continue
+                if not line.strip():
+                    continue
                 try:
                     doc = json.loads(line)
                 except Exception:
@@ -215,19 +221,21 @@ def retrieve_passages(query: str, top_k: int = 3, target_lang: Optional[str] = N
                 matches_count = sum(1 for token in q_tokens if token in text_lower)
                 
                 if matches_count > 0:
-                    score = min(0.95, 0.70 + (matches_count * 0.10))
+                    score = min(0.99, 0.60 + (matches_count * 0.15))
                     results.append({
                         "score": round(score, 4),
                         "language": effective_lang,
                         "query_id": doc.get("query_id"),
                         "text": doc_text
                     })
-                    if len(results) >= top_k:
-                        break
+
+    # Enforce strict descending sort so passages[0] is the definitive best answer
+    results.sort(key=lambda x: x["score"], reverse=True)
+    final_passages = results[:top_k]
 
     ret_time = (time.perf_counter() - t0) * 1000.0
-    print(f"[RAG Engine] Lang: {effective_lang.upper()} | Matches: {len(results)} | Latency: {ret_time:.2f}ms")
-    return results, ret_time, effective_lang
+    print(f"[RAG Engine] Lang: {effective_lang.upper()} | Matches: {len(final_passages)} | Latency: {ret_time:.2f}ms")
+    return final_passages, ret_time, effective_lang
 
 
 # ============================================================
