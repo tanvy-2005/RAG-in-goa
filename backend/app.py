@@ -1,18 +1,17 @@
 import os
-
-# ============================================================
-# 0. ENVIRONMENT / RESOURCE CONFIGURATION
-# ============================================================
-
-# Set these BEFORE importing torch.
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-
 import time
 import json
 import re
-import threading
+import gc
+
+# ============================================================
+# MEMORY CONFIGURATION — MUST BE BEFORE TORCH IMPORT
+# ============================================================
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
 
 import numpy as np
 import faiss
@@ -28,21 +27,30 @@ from transformers import AutoTokenizer, AutoModel
 
 
 # ============================================================
-# 1. RUNTIME CONFIGURATION
+# 1. PYTORCH MEMORY SETTINGS
 # ============================================================
 
 torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
 
-HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
-SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "").strip()
-
-if HF_TOKEN:
-    os.environ["HUGGING_FACE_HUB_TOKEN"] = HF_TOKEN
+# Disable gradients globally
+torch.set_grad_enabled(False)
 
 
 # ============================================================
-# 2. FILE / MODEL CONFIGURATION
+# 2. ENVIRONMENT VARIABLES
+# ============================================================
+
+HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
+
+SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "").strip()
+
+if not SARVAM_API_KEY:
+    print("WARNING: SARVAM_API_KEY is not configured.")
+
+
+# ============================================================
+# 3. FILE PATHS
 # ============================================================
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -61,38 +69,31 @@ MODEL_NAME = "intfloat/multilingual-e5-small"
 
 
 # ============================================================
-# 3. FASTAPI APPLICATION
+# 4. FASTAPI
 # ============================================================
 
 app = FastAPI(
-    title="Voice-Enabled Multilingual Indic RAG Harness",
-    description="Multilingual Indic RAG retrieval engine using FAISS and multilingual-e5-small",
+    title="RAG-in-Goa Multilingual RAG API",
+    description="Multilingual Indic semantic retrieval using FAISS",
     version="39.0"
 )
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
 # ============================================================
-# 4. LOAD FAISS INDEX
+# 5. LOAD FAISS INDEX
 # ============================================================
 
 print("=" * 60)
-print("INITIALIZING MULTILINGUAL INDIC NEURAL RAG ENGINE")
+print("INITIALIZING MULTILINGUAL INDIC RAG ENGINE")
 print("=" * 60)
-
-print(f"Looking for FAISS index:")
-print(INDEX_FILE)
-
-print(f"Looking for metadata:")
-print(METADATA_FILE)
-
 
 if not os.path.exists(INDEX_FILE):
     raise FileNotFoundError(
@@ -105,27 +106,29 @@ if not os.path.exists(METADATA_FILE):
     )
 
 
-print("\nLoading FAISS Index...")
+print(f"Loading FAISS index from: {INDEX_FILE}")
 
 index = faiss.read_index(INDEX_FILE)
 
 total_vectors = index.ntotal
 
 print(
-    f"Total Vectors Indexed: {total_vectors:,}"
+    f"Total vectors indexed: {total_vectors:,}"
 )
 
 
 # ============================================================
-# 5. BUILD METADATA DISK SEEK MAP
+# 6. METADATA DISK SEEK MAP
 # ============================================================
 
+print("Building metadata disk seek map...")
+
 doc_offsets = []
-docs_cache = {}
 
-print("Building disk seek map...")
-
-with open(METADATA_FILE, "rb") as f:
+with open(
+    METADATA_FILE,
+    "rb"
+) as f:
 
     offset = 0
 
@@ -137,191 +140,174 @@ with open(METADATA_FILE, "rb") as f:
 
 
 print(
-    f"Metadata records available: {len(doc_offsets):,}"
+    f"Metadata records: {len(doc_offsets):,}"
 )
 
 
-if len(doc_offsets) != total_vectors:
+# Small cache only
+# Prevents unbounded memory growth.
 
-    print(
-        "WARNING: FAISS vector count and metadata record count "
-        "do not match!"
-    )
+docs_cache = {}
 
-    print(
-        f"FAISS vectors : {total_vectors:,}"
-    )
-
-    print(
-        f"Metadata rows : {len(doc_offsets):,}"
-    )
+MAX_CACHE_SIZE = 100
 
 
-# ============================================================
-# 6. METADATA READER
-# ============================================================
-
-def get_metadata_by_id(doc_idx: int) -> dict:
+def get_metadata_by_id(doc_idx: int):
 
     if doc_idx in docs_cache:
+
         return docs_cache[doc_idx]
 
-    if not (0 <= doc_idx < len(doc_offsets)):
+    if not (
+        0 <= doc_idx < len(doc_offsets)
+    ):
         return {}
+
 
     try:
 
-        with open(METADATA_FILE, "rb") as f:
+        with open(
+            METADATA_FILE,
+            "rb"
+        ) as f:
 
-            f.seek(doc_offsets[doc_idx])
+            f.seek(
+                doc_offsets[doc_idx]
+            )
 
-            line = f.readline().decode(
+            line = f.readline()
+
+
+        if not line:
+            return {}
+
+
+        data = json.loads(
+            line.decode(
                 "utf-8",
                 errors="ignore"
             )
+        )
 
-        if not line.strip():
-            return {}
 
-        data = json.loads(line)
+        # Keep cache bounded
+        if len(docs_cache) >= MAX_CACHE_SIZE:
 
-        # Small cache
-        if len(docs_cache) < 1000:
-            docs_cache[doc_idx] = data
+            first_key = next(
+                iter(docs_cache)
+            )
+
+            del docs_cache[first_key]
+
+
+        docs_cache[doc_idx] = data
 
         return data
+
 
     except Exception as e:
 
         print(
-            f"[Metadata Error] index={doc_idx}: {e}"
+            f"Metadata error: {e}"
         )
 
         return {}
 
 
 # ============================================================
-# 7. LAZY MULTILINGUAL EMBEDDING MODEL
+# 7. LOAD MULTILINGUAL E5 MODEL
 # ============================================================
 
-tokenizer = None
-embed_model = None
+print()
+print(
+    f"Loading embedding model: {MODEL_NAME}"
+)
 
-model_lock = threading.Lock()
+auth_token = (
+    HF_TOKEN
+    if HF_TOKEN
+    and not HF_TOKEN.startswith("hf_xxx")
+    else None
+)
 
 
-def load_embedding_model():
+# Tokenizer
 
-    global tokenizer
-    global embed_model
+tokenizer = AutoTokenizer.from_pretrained(
+    MODEL_NAME,
+    use_fast=True,
+    token=auth_token
+)
 
-    # Already loaded
-    if tokenizer is not None and embed_model is not None:
-        return
 
-    with model_lock:
+# Model
 
-        # Check again after acquiring lock
-        if tokenizer is not None and embed_model is not None:
-            return
+embed_model = AutoModel.from_pretrained(
+    MODEL_NAME,
+    low_cpu_mem_usage=True,
+    token=auth_token
+)
 
-        print("\n" + "=" * 60)
-        print("LOADING MULTILINGUAL EMBEDDING MODEL")
-        print("=" * 60)
-
-        auth_token = (
-            HF_TOKEN
-            if HF_TOKEN and not HF_TOKEN.startswith("hf_xxx")
-            else None
-        )
-
-        print(
-            f"Model: {MODEL_NAME}"
-        )
-
-        print("Loading tokenizer...")
-
-        tokenizer = AutoTokenizer.from_pretrained(
-            MODEL_NAME,
-            use_fast=True,
-            token=auth_token
-        )
-
-        print("Tokenizer loaded!")
-
-        print("Loading transformer model...")
-
-        model = AutoModel.from_pretrained(
-            MODEL_NAME,
-            low_cpu_mem_usage=True,
-            token=auth_token
-        )
-
-        print("Transformer model loaded!")
-
-        # ----------------------------------------------------
-        # Dynamic INT8 quantization
-        # ----------------------------------------------------
-        #
-        # This reduces RAM usage for Linear layers.
-        # It is especially useful on CPU-only Railway deployments.
-        #
-
-        try:
-
-            print("Applying dynamic INT8 quantization...")
-
-            model = torch.quantization.quantize_dynamic(
-                model,
-                {
-                    torch.nn.Linear
-                },
-                dtype=torch.qint8
-            )
-
-            print(
-                "Dynamic INT8 quantization applied!"
-            )
-
-        except Exception as e:
-
-            print(
-                f"WARNING: Quantization failed: {e}"
-            )
-
-            print(
-                "Continuing with normal CPU model."
-            )
-
-        model.eval()
-
-        embed_model = model
-
-        print(
-            "Multilingual embedding model ready!"
-        )
-
-        print("=" * 60)
+embed_model.eval()
 
 
 # ============================================================
-# 8. QUERY EMBEDDING
+# 8. DYNAMIC INT8 QUANTIZATION
 # ============================================================
 
-def encode_query(query_text: str) -> np.ndarray:
+print()
+print("Applying CPU INT8 quantization...")
 
-    if not query_text or not query_text.strip():
-        raise ValueError(
-            "Query cannot be empty."
-        )
+try:
 
-    # Load only when first request arrives.
-    load_embedding_model()
+    embed_model = torch.quantization.quantize_dynamic(
+        embed_model,
+        {
+            torch.nn.Linear
+        },
+        dtype=torch.qint8
+    )
+
+    print(
+        "INT8 quantization enabled."
+    )
+
+except Exception as e:
+
+    print(
+        "INT8 quantization unavailable:"
+    )
+
+    print(e)
+
+    print(
+        "Continuing with FP32 model."
+    )
+
+
+# ============================================================
+# 9. QUERY EMBEDDING
+# ============================================================
+
+def encode_query(
+    query_text: str
+) -> np.ndarray:
+
+    """
+    Generate multilingual-e5 query embedding.
+
+    E5 requires:
+        query: <text>
+
+    Output:
+        normalized float32 vector
+    """
 
     formatted = (
         "query: "
         + query_text.strip()
     )
+
 
     inputs = tokenizer(
         formatted,
@@ -331,55 +317,113 @@ def encode_query(query_text: str) -> np.ndarray:
         truncation=True
     )
 
+
     with torch.inference_mode():
 
         outputs = embed_model(
             **inputs
         )
 
-        # Mean pooling
+
+        hidden = (
+            outputs.last_hidden_state
+        )
+
+
         mask = (
             inputs["attention_mask"]
             .unsqueeze(-1)
-            .expand(
-                outputs.last_hidden_state.size()
-            )
+            .expand(hidden.size())
             .float()
         )
 
-        sum_embeddings = torch.sum(
-            outputs.last_hidden_state * mask,
-            dim=1
+
+        masked_embeddings = (
+            hidden * mask
         )
 
-        sum_mask = torch.clamp(
-            mask.sum(dim=1),
-            min=1e-9
+
+        sum_embeddings = (
+            masked_embeddings.sum(
+                dim=1
+            )
         )
 
-        mean_pooled = (
-            sum_embeddings / sum_mask
+
+        sum_mask = (
+            mask.sum(
+                dim=1
+            ).clamp(
+                min=1e-9
+            )
         )
 
-        # L2 normalization
+
+        mean_embedding = (
+            sum_embeddings
+            / sum_mask
+        )
+
+
         normalized = torch.nn.functional.normalize(
-            mean_pooled,
+            mean_embedding,
             p=2,
             dim=1
         )
 
-        embedding = (
+
+        result = (
             normalized
             .cpu()
             .numpy()
-            .astype("float32")
+            .astype(
+                "float32"
+            )
         )
 
-    return embedding
+
+    # Explicit cleanup
+    del inputs
+    del outputs
+
+    return result
 
 
 # ============================================================
-# 9. LANGUAGE ALIASES
+# 10. WARMUP
+# ============================================================
+
+print()
+print("Running embedding warmup...")
+
+try:
+
+    _ = encode_query(
+        "warmup"
+    )
+
+    gc.collect()
+
+    print(
+        "Embedding warmup complete."
+    )
+
+except Exception as e:
+
+    print(
+        f"Warmup failed: {e}"
+    )
+
+
+print()
+print("=" * 60)
+print("RAG ENGINE READY")
+print("=" * 60)
+print()
+
+
+# ============================================================
+# 11. LANGUAGE DETECTION
 # ============================================================
 
 LANG_ALIASES = {
@@ -435,10 +479,6 @@ LANG_ALIASES = {
 }
 
 
-# ============================================================
-# 10. SARVAM LANGUAGE MAP
-# ============================================================
-
 SARVAM_BCP47_MAP = {
 
     "hi": "hi-IN",
@@ -459,13 +499,9 @@ SARVAM_BCP47_MAP = {
 }
 
 
-# ============================================================
-# 11. LANGUAGE NORMALIZATION
-# ============================================================
-
 def normalize_lang_code(
     code: Optional[str]
-) -> Optional[str]:
+):
 
     if not code:
         return None
@@ -484,18 +520,15 @@ def normalize_lang_code(
     )
 
 
-# ============================================================
-# 12. INDIC LANGUAGE CLASSIFIER
-# ============================================================
-
 def classify_indic_language(
     text: str,
     hint_lang: Optional[str] = None
-) -> str:
+):
 
     norm_hint = normalize_lang_code(
         hint_lang
     )
+
 
     if (
         norm_hint
@@ -505,7 +538,9 @@ def classify_indic_language(
             ""
         ]
     ):
+
         return norm_hint
+
 
     cleaned = re.sub(
         r"[।॥?!,.:;\"'()\-—]",
@@ -513,13 +548,11 @@ def classify_indic_language(
         text
     ).strip()
 
+
     words = set(
         cleaned.split()
     )
 
-    txt_blob = (
-        f" {cleaned} "
-    )
 
     # Odia
     if re.search(
@@ -528,12 +561,14 @@ def classify_indic_language(
     ):
         return "or"
 
+
     # Tamil
     if re.search(
         r"[\u0B80-\u0BFF]",
         cleaned
     ):
         return "ta"
+
 
     # Telugu
     if re.search(
@@ -542,12 +577,14 @@ def classify_indic_language(
     ):
         return "te"
 
+
     # Kannada
     if re.search(
         r"[\u0C80-\u0CFF]",
         cleaned
     ):
         return "kn"
+
 
     # Malayalam
     if re.search(
@@ -556,12 +593,14 @@ def classify_indic_language(
     ):
         return "ml"
 
+
     # Gujarati
     if re.search(
         r"[\u0A80-\u0AFF]",
         cleaned
     ):
         return "gu"
+
 
     # Punjabi
     if re.search(
@@ -570,12 +609,14 @@ def classify_indic_language(
     ):
         return "pa"
 
+
     # Urdu
     if re.search(
         r"[\u0600-\u06FF]",
         cleaned
     ):
         return "ur"
+
 
     # Bengali / Assamese
     if re.search(
@@ -590,7 +631,9 @@ def classify_indic_language(
                 "ৱ"
             ]
         ):
+
             return "as"
+
 
         if any(
             w in words
@@ -601,9 +644,12 @@ def classify_indic_language(
                 "আছে"
             ]
         ):
+
             return "as"
 
+
         return "bn"
+
 
     # Devanagari
     if re.search(
@@ -611,16 +657,16 @@ def classify_indic_language(
         cleaned
     ):
 
-        # Marathi
         if (
-            "\u0933" in cleaned
-            or "ळ" in cleaned
+            "ळ" in cleaned
         ):
+
             return "mr"
 
+
         if any(
-            f" {m} " in txt_blob
-            for m in [
+            w in words
+            for w in [
                 "काय",
                 "म्हणजे",
                 "कसा",
@@ -628,23 +674,25 @@ def classify_indic_language(
                 "नाही"
             ]
         ):
+
             return "mr"
 
-        # Sanskrit
+
         if (
             "ः" in cleaned
             or any(
-                f" {s} " in txt_blob
-                for s in [
+                w in words
+                for w in [
                     "किमिति",
                     "अस्ति",
                     "भवति"
                 ]
             )
         ):
+
             return "sa"
 
-        # Nepali
+
         if any(
             p in cleaned
             for p in [
@@ -653,16 +701,18 @@ def classify_indic_language(
                 "भनेको"
             ]
         ):
+
             return "ne"
+
 
         return "hi"
 
-    # Default English
+
     return "en"
 
 
 # ============================================================
-# 13. FAISS RETRIEVAL
+# 12. RETRIEVAL
 # ============================================================
 
 def retrieve_passages(
@@ -673,45 +723,54 @@ def retrieve_passages(
 
     t0 = time.perf_counter()
 
-    effective_lang = classify_indic_language(
-        query,
-        target_lang
+
+    effective_lang = (
+        classify_indic_language(
+            query,
+            target_lang
+        )
     )
 
-    # Generate query embedding
+
     q_emb = encode_query(
         query
     )
 
+
+    # Search only top 50 instead of 100
     search_k = min(
-        100,
+        50,
         index.ntotal
     )
+
 
     scores, indices = index.search(
         q_emb,
         search_k
     )
 
+
     lang_matches = []
     global_matches = []
+
 
     for score, idx in zip(
         scores[0],
         indices[0]
     ):
 
-        if not (
-            0 <= idx < total_vectors
-        ):
+        if idx < 0:
             continue
+
 
         doc = get_metadata_by_id(
             int(idx)
         )
 
+
         if not doc:
             continue
+
 
         doc_lang = normalize_lang_code(
             str(
@@ -722,6 +781,7 @@ def retrieve_passages(
             )
         )
 
+
         item = {
 
             "score": round(
@@ -729,58 +789,44 @@ def retrieve_passages(
                 4
             ),
 
-            "language": (
+            "language":
                 doc_lang
-                or effective_lang
-            ),
+                or effective_lang,
 
-            "query_id": doc.get(
-                "query_id"
-            ),
+            "query_id":
+                doc.get(
+                    "query_id"
+                ),
 
-            "text": doc.get(
-                "text",
-                ""
-            )
+            "text":
+                doc.get(
+                    "text",
+                    ""
+                )
         }
+
+
+        if (
+            doc_lang
+            == effective_lang
+        ):
+
+            lang_matches.append(
+                item
+            )
+
 
         global_matches.append(
             item
         )
 
-        if doc_lang == effective_lang:
-            lang_matches.append(
-                item
-            )
 
-    # Prefer language-specific retrieval
-    if len(lang_matches) >= top_k:
+    # Prefer requested language
+    if lang_matches:
 
-        results = lang_matches[:top_k]
-
-    elif len(lang_matches) > 0:
-
-        # Fill remaining slots globally
-        results = lang_matches[:]
-
-        used_ids = {
-            x.get("query_id")
-            for x in results
-        }
-
-        for item in global_matches:
-
-            if (
-                item.get("query_id")
-                not in used_ids
-            ):
-
-                results.append(
-                    item
-                )
-
-            if len(results) >= top_k:
-                break
+        results = lang_matches[
+            :top_k
+        ]
 
     else:
 
@@ -788,18 +834,21 @@ def retrieve_passages(
             :top_k
         ]
 
+
     ret_time = (
         time.perf_counter()
         - t0
     ) * 1000.0
 
+
     print(
-        f"[Neural RAG] "
-        f"Query='{query[:50]}' | "
-        f"Language={effective_lang} | "
-        f"Matches={len(results)} | "
+        f"[RAG] "
+        f"Query='{query[:40]}' "
+        f"Lang={effective_lang} "
+        f"Results={len(results)} "
         f"Latency={ret_time:.2f}ms"
     )
+
 
     return (
         results,
@@ -809,7 +858,7 @@ def retrieve_passages(
 
 
 # ============================================================
-# 14. REQUEST MODEL
+# 13. REQUEST MODEL
 # ============================================================
 
 class QueryRequest(BaseModel):
@@ -820,7 +869,7 @@ class QueryRequest(BaseModel):
 
 
 # ============================================================
-# 15. HEALTH CHECK
+# 14. HEALTH CHECK
 # ============================================================
 
 @app.get("/")
@@ -831,52 +880,23 @@ def health_check():
         "status": "online",
 
         "service":
-            "Voice-Enabled Multilingual Indic RAG Harness",
-
-        "model":
-            MODEL_NAME,
+            "RAG-in-Goa Multilingual RAG",
 
         "vectors_indexed":
             index.ntotal,
 
-        "metadata_records":
-            len(doc_offsets),
+        "embedding_model":
+            MODEL_NAME,
 
-        "embedding_model_loaded":
-            embed_model is not None,
-
-        "docs_url":
-            "/docs"
+        "endpoints": [
+            "/api/ask",
+            "/api/voice-ask"
+        ]
     }
 
 
 # ============================================================
-# 16. MODEL STATUS ENDPOINT
-# ============================================================
-
-@app.get("/api/status")
-def status():
-
-    return {
-
-        "status": "online",
-
-        "faiss_vectors":
-            index.ntotal,
-
-        "metadata_records":
-            len(doc_offsets),
-
-        "embedding_model_loaded":
-            embed_model is not None,
-
-        "model":
-            MODEL_NAME
-    }
-
-
-# ============================================================
-# 17. TEXT RAG ENDPOINT
+# 15. TEXT QUERY
 # ============================================================
 
 @app.post("/api/ask")
@@ -884,45 +904,35 @@ def process_text_query(
     req: QueryRequest
 ):
 
-    if not req.query or not req.query.strip():
+    t_start = (
+        time.perf_counter()
+    )
+
+
+    if not req.query.strip():
 
         raise HTTPException(
             status_code=400,
             detail="Query cannot be empty."
         )
 
-    t_start = time.perf_counter()
 
-    try:
-
-        passages, ret_time, matched_lang = (
-            retrieve_passages(
-                req.query,
-                top_k=3,
-                target_lang=req.language
-            )
+    passages, ret_time, matched_lang = (
+        retrieve_passages(
+            req.query,
+            top_k=3,
+            target_lang=req.language
         )
+    )
 
-    except Exception as e:
-
-        print(
-            f"[Retrieval Error] {e}"
-        )
-
-        raise HTTPException(
-            status_code=500,
-            detail=f"Retrieval failed: {str(e)}"
-        )
 
     total_time = (
         time.perf_counter()
         - t_start
     ) * 1000.0
 
-    # --------------------------------------------------------
-    # Grounding check
-    # --------------------------------------------------------
 
+    # Grounding threshold
     if (
         not passages
         or passages[0]["score"] < 0.35
@@ -958,16 +968,16 @@ def process_text_query(
                 ),
 
             "passed_target_200ms":
-                bool(
-                    total_time < 200.0
-                )
+                total_time < 200
         }
 
-    # --------------------------------------------------------
-    # Grounded response
-    # --------------------------------------------------------
 
-    return {
+    answer = passages[0][
+        "text"
+    ]
+
+
+    result = {
 
         "query":
             req.query,
@@ -976,7 +986,7 @@ def process_text_query(
             matched_lang,
 
         "answer":
-            passages[0]["text"],
+            answer,
 
         "grounded":
             True,
@@ -997,14 +1007,19 @@ def process_text_query(
             ),
 
         "passed_target_200ms":
-            bool(
-                total_time < 200.0
-            )
+            total_time < 200
     }
 
 
+    # Cleanup temporary objects
+    gc.collect()
+
+
+    return result
+
+
 # ============================================================
-# 18. SARVAM VOICE QUERY
+# 16. VOICE QUERY
 # ============================================================
 
 @app.post("/api/voice-ask")
@@ -1012,22 +1027,29 @@ async def process_voice_query(
 
     file: UploadFile = File(...),
 
-    language: Optional[str] = Form(
-        "auto"
-    )
+    language: Optional[str] = Form("auto")
 ):
 
-    t_start = time.perf_counter()
+    t_start = (
+        time.perf_counter()
+    )
+
+
+    # --------------------------------------------------------
+    # Check API key
+    # --------------------------------------------------------
 
     if not SARVAM_API_KEY:
 
         raise HTTPException(
             status_code=500,
-            detail=(
-                "SARVAM_API_KEY is not configured "
-                "on the server."
-            )
+            detail="SARVAM_API_KEY is not configured."
         )
+
+
+    # --------------------------------------------------------
+    # Read audio
+    # --------------------------------------------------------
 
     audio_data = await file.read()
 
@@ -1035,19 +1057,33 @@ async def process_voice_query(
 
         raise HTTPException(
             status_code=400,
-            detail="Uploaded audio file is empty."
+            detail="Empty audio file."
         )
+
+
+    # Limit audio size
+    MAX_AUDIO_SIZE = 10 * 1024 * 1024
+
+    if len(audio_data) > MAX_AUDIO_SIZE:
+
+        raise HTTPException(
+            status_code=413,
+            detail="Audio file is too large. Maximum size is 10 MB."
+        )
+
 
     orig_filename = (
         file.filename
-        or ""
+        or "audio.wav"
     )
 
+
     # --------------------------------------------------------
-    # Determine requested language
+    # Determine language
     # --------------------------------------------------------
 
     resolved_hint = None
+
 
     if (
         language
@@ -1059,30 +1095,68 @@ async def process_voice_query(
         ]
     ):
 
-        resolved_hint = normalize_lang_code(
-            language
+        resolved_hint = (
+            normalize_lang_code(
+                language
+            )
         )
 
-    else:
 
-        # Try filename
-        resolved_hint = normalize_lang_code(
-            orig_filename
-        )
+    # --------------------------------------------------------
+    # Sarvam language
+    # --------------------------------------------------------
 
     sarvam_lang_code = (
         SARVAM_BCP47_MAP.get(
             resolved_hint,
             "unknown"
         )
-        if resolved_hint
-        else "unknown"
     )
+
 
     transcript = ""
 
+
     # --------------------------------------------------------
-    # Sarvam Speech-to-Text
+    # Determine file type
+    # --------------------------------------------------------
+
+    lower_filename = (
+        orig_filename.lower()
+    )
+
+
+    if lower_filename.endswith(
+        ".mp3"
+    ):
+
+        filename = "audio.mp3"
+
+        content_type = (
+            "audio/mpeg"
+        )
+
+    elif lower_filename.endswith(
+        ".wav"
+    ):
+
+        filename = "audio.wav"
+
+        content_type = (
+            "audio/wav"
+        )
+
+    else:
+
+        filename = "audio.wav"
+
+        content_type = (
+            "audio/wav"
+        )
+
+
+    # --------------------------------------------------------
+    # Sarvam STT
     # --------------------------------------------------------
 
     try:
@@ -1092,28 +1166,13 @@ async def process_voice_query(
             "speech-to-text"
         )
 
+
         headers = {
 
             "api-subscription-key":
                 SARVAM_API_KEY
         }
 
-        is_mp3 = (
-            "mp3"
-            in orig_filename.lower()
-        )
-
-        filename = (
-            "audio.mp3"
-            if is_mp3
-            else "audio.wav"
-        )
-
-        content_type = (
-            "audio/mpeg"
-            if is_mp3
-            else "audio/wav"
-        )
 
         files = {
 
@@ -1123,6 +1182,7 @@ async def process_voice_query(
                 content_type
             )
         }
+
 
         data = {
 
@@ -1136,12 +1196,13 @@ async def process_voice_query(
                 sarvam_lang_code
         }
 
+
         print(
-            f"[Sarvam STT] "
-            f"Language={sarvam_lang_code}"
+            "[Sarvam] Sending audio..."
         )
 
-        res = requests.post(
+
+        response = requests.post(
 
             url,
 
@@ -1151,58 +1212,89 @@ async def process_voice_query(
 
             data=data,
 
-            timeout=15
+            timeout=10
         )
+
 
         print(
-            f"[Sarvam STT] "
-            f"HTTP {res.status_code}"
+            f"[Sarvam] Status: "
+            f"{response.status_code}"
         )
 
-        if res.status_code == 200:
 
-            response_json = (
-                res.json()
+        if (
+            response.status_code
+            != 200
+        ):
+
+            print(
+                "[Sarvam] Error:",
+                response.text[:500]
             )
 
-            transcript = (
-                response_json
-                .get(
-                    "transcript",
-                    ""
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Sarvam speech-to-text "
+                    "request failed."
                 )
-                .strip()
             )
 
-            print(
-                f"[Sarvam STT] "
-                f"Transcribed: "
-                f"'{transcript}'"
-            )
 
-        else:
+        response_json = (
+            response.json()
+        )
 
-            print(
-                "[Sarvam STT] "
-                f"Error response: "
-                f"{res.text[:500]}"
+
+        transcript = (
+            response_json
+            .get(
+                "transcript",
+                ""
             )
+            .strip()
+        )
+
 
     except requests.Timeout:
 
         raise HTTPException(
             status_code=504,
             detail=(
-                "Sarvam speech-to-text "
-                "request timed out."
+                "Speech recognition "
+                "timed out."
             )
         )
+
+
+    except HTTPException:
+
+        raise
+
 
     except Exception as e:
 
         print(
-            f"[STT Error] {e}"
+            "[STT Error]",
+            repr(e)
         )
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Speech recognition "
+                "service failed."
+            )
+        )
+
+
+    finally:
+
+        # Release audio memory
+        del audio_data
+
+        gc.collect()
+
 
     # --------------------------------------------------------
     # Validate transcript
@@ -1217,84 +1309,120 @@ async def process_voice_query(
             )
         )
 
+
+    print(
+        f"[Sarvam STT] "
+        f"Transcript: {transcript}"
+    )
+
+
     # --------------------------------------------------------
     # Detect language
     # --------------------------------------------------------
 
-    final_lang = classify_indic_language(
-        transcript,
-        resolved_hint
-    )
-
-    # --------------------------------------------------------
-    # Run RAG
-    # --------------------------------------------------------
-
-    rag_response = process_text_query(
-
-        QueryRequest(
-
-            query=transcript,
-
-            language=final_lang
+    final_lang = (
+        classify_indic_language(
+            transcript,
+            resolved_hint
         )
     )
 
-    rag_response[
-        "transcribed_text"
-    ] = transcript
 
-    rag_response[
-        "detected_language"
-    ] = final_lang
+    # --------------------------------------------------------
+    # RAG retrieval
+    # --------------------------------------------------------
 
-    rag_response[
-        "audio_pipeline_total_ms"
-    ] = round(
+    try:
 
-        (
+        passages, ret_time, matched_lang = (
+            retrieve_passages(
+                transcript,
+                top_k=3,
+                target_lang=final_lang
+            )
+        )
+
+
+        total_time = (
             time.perf_counter()
             - t_start
-        ) * 1000.0,
-
-        2
-    )
-
-    return rag_response
+        ) * 1000.0
 
 
-# ============================================================
-# 19. STARTUP MESSAGE
-# ============================================================
+        if (
+            not passages
+            or passages[0]["score"] < 0.35
+        ):
 
-@app.on_event("startup")
-async def startup_event():
+            answer = (
+                "The query is outside "
+                "the verified dataset "
+                "knowledge base."
+            )
 
-    print("\n")
-    print("=" * 60)
-    print("RAG-IN-GOA API STARTED")
-    print("=" * 60)
+            grounded = False
 
-    print(
-        f"FAISS vectors : {index.ntotal:,}"
-    )
+            passages = []
 
-    print(
-        f"Metadata rows : {len(doc_offsets):,}"
-    )
 
-    print(
-        f"Embedding model : {MODEL_NAME}"
-    )
+        else:
 
-    print(
-        "Embedding model will be loaded lazily "
-        "on the first query."
-    )
+            answer = passages[0][
+                "text"
+            ]
 
-    print(
-        "Server startup complete."
-    )
+            grounded = True
 
-    print("=" * 60)
-    print("\n")
+
+        result = {
+
+            "query":
+                transcript,
+
+            "language":
+                matched_lang,
+
+            "answer":
+                answer,
+
+            "grounded":
+                grounded,
+
+            "passages":
+                passages,
+
+            "transcribed_text":
+                transcript,
+
+            "detected_language":
+                final_lang,
+
+            "latency_ms":
+                round(
+                    total_time,
+                    2
+                ),
+
+            "retrieval_ms":
+                round(
+                    ret_time,
+                    2
+                ),
+
+            "audio_pipeline_total_ms":
+                round(
+                    total_time,
+                    2
+                ),
+
+            "passed_target_200ms":
+                total_time < 200
+        }
+
+
+        return result
+
+
+    finally:
+
+        gc.collect()
