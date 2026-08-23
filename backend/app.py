@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 
 # ============================================================
-# 1. RUNTIME CONFIGURATION (HF MODEL & TOKENS)
+# 1. RUNTIME CONFIGURATION (HF MODEL + MEAN POOLING)
 # ============================================================
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "sk_8x94884j_MrW1uKlHhyOVd3Qf4tAhxopU")
 HF_TOKEN = os.getenv("HF_TOKEN", "")
@@ -25,7 +25,7 @@ HF_API_URL = f"https://api-inference.huggingface.co/pipeline/feature-extraction/
 app = FastAPI(
     title="Voice-Enabled Multilingual Indic RAG Harness",
     description="Sub-200ms Indic Neural RAG with Hugging Face Model Integration",
-    version="35.0"
+    version="36.0"
 )
 
 app.add_middleware(
@@ -84,15 +84,16 @@ def get_metadata_by_id(doc_idx: int) -> dict:
 
 
 # ============================================================
-# 3. HUGGING FACE INFERENCE EMBEDDER (WITH HF_TOKEN)
+# 3. ROBUST HF INFERENCE EMBEDDER WITH SHAPE NORMALIZATION
 # ============================================================
 def encode_with_hf_model(query_text: str) -> Optional[np.ndarray]:
-    """Generates exact 384d semantic vectors from Hugging Face Inference API."""
+    """Generates normalized 384d semantic vectors from HF Feature Extraction."""
     token = os.getenv("HF_TOKEN", HF_TOKEN).strip()
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     
+    # Must use 'query: ' prefix for e5 embeddings
     payload = {
-        "inputs": [f"query: {query_text.strip()}"],
+        "inputs": f"query: {query_text.strip()}",
         "options": {"wait_for_model": True, "use_cache": True}
     }
     
@@ -100,20 +101,28 @@ def encode_with_hf_model(query_text: str) -> Optional[np.ndarray]:
         res = http_session.post(HF_API_URL, headers=headers, json=payload, timeout=5.0)
         if res.status_code == 200:
             data = res.json()
-            emb = np.array(data, dtype="float32")
-            if emb.ndim == 3:
-                emb = emb.mean(axis=1)
-            elif emb.ndim == 2 and emb.shape[0] > 1:
-                emb = emb.mean(axis=0, keepdims=True)
-            elif emb.ndim == 1:
-                emb = np.expand_dims(emb, axis=0)
+            raw_emb = np.array(data, dtype="float32")
+            
+            # Case A: (seq_len, 384) -> Mean pool to (1, 384)
+            if raw_emb.ndim == 2:
+                emb = np.mean(raw_emb, axis=0, keepdims=True)
+            # Case B: (1, seq_len, 384) -> Mean pool to (1, 384)
+            elif raw_emb.ndim == 3:
+                emb = np.mean(raw_emb, axis=1)
+            # Case C: (384,) -> Reshape to (1, 384)
+            elif raw_emb.ndim == 1:
+                emb = np.expand_dims(raw_emb, axis=0)
+            else:
+                return None
+
+            # Cosine normalization matching FAISS IndexFlatIP / L2
             norm = np.linalg.norm(emb, axis=1, keepdims=True)
             norm[norm == 0] = 1.0
             return (emb / norm).astype("float32")
         else:
-            print(f"[HF API Notice] Status: {res.status_code} | Body: {res.text[:100]}")
+            print(f"[HF Status {res.status_code}] {res.text[:120]}")
     except Exception as e:
-        print(f"[HF API Exception] {e}")
+        print(f"[HF Exception] {e}")
     return None
 
 
@@ -205,7 +214,7 @@ def retrieve_passages(query: str, top_k: int = 3, target_lang: Optional[str] = N
                     if len(results) >= top_k:
                         break
 
-        # Fallback to top global matches if strict language filter had 0 results
+        # Fallback to top global matches if language tag is broad
         if not results:
             for score, idx in zip(scores[0], indices[0]):
                 if 0 <= idx < total_vectors:
@@ -223,7 +232,7 @@ def retrieve_passages(query: str, top_k: int = 3, target_lang: Optional[str] = N
     results.sort(key=lambda x: x["score"], reverse=True)
     final_passages = results[:top_k]
     ret_time = (time.perf_counter() - t0) * 1000.0
-    print(f"[Neural RAG] Query: '{query[:30]}' | Lang: {effective_lang.upper()} | Matches: {len(final_passages)} | Latency: {ret_time:.2f}ms")
+    print(f"[Neural RAG] Query: '{query[:30]}' | Matches: {len(final_passages)} | Latency: {ret_time:.2f}ms")
     return final_passages, ret_time, effective_lang
 
 
