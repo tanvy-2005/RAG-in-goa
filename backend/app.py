@@ -2,6 +2,7 @@ import os
 import time
 import json
 import re
+import torch
 import numpy as np
 import faiss
 import requests
@@ -9,12 +10,14 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
-from transformers import AutoTokenizer
-from optimum.onnxruntime import ORTModelForFeatureExtraction
+from sentence_transformers import SentenceTransformer
 
 # ============================================================
-# 1. RUNTIME CONFIGURATION (<200ms TARGET)
+# 1. RUNTIME CONFIGURATION
 # ============================================================
+torch.set_num_threads(2)
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "sk_8x94884j_MrW1uKlHhyOVd3Qf4tAhxopU")
 INDEX_FILE = os.path.join(os.path.dirname(__file__), "multilingual.index")
 METADATA_FILE = os.path.join(os.path.dirname(__file__), "multilingual_metadata.jsonl")
@@ -22,8 +25,8 @@ MODEL_NAME = "intfloat/multilingual-e5-small"
 
 app = FastAPI(
     title="Voice-Enabled Multilingual Indic RAG Harness",
-    description="Sub-200ms 14-Language Indic Vector Search, Sarvam STT & Strict Grounding Guardrail Engine",
-    version="16.0"
+    description="Sub-200ms 14-Language Indic Vector Search, Sarvam STT & Strict Grounding Engine",
+    version="18.0"
 )
 
 app.add_middleware(
@@ -35,10 +38,10 @@ app.add_middleware(
 )
 
 # ============================================================
-# 2. FAST ON-DISK SEEK INDEXING & ONNX MODEL (ZERO PYTORCH)
+# 2. LOAD FAISS INDEX, SEEK TABLE & EMBEDDINGS
 # ============================================================
 print("=" * 60)
-print("INITIALIZING MULTILINGUAL INDIC RAG ENGINE (ONNX RUNTIME)")
+print("INITIALIZING MULTILINGUAL INDIC RAG ENGINE (RAILWAY READY)")
 print("=" * 60)
 
 if not os.path.exists(INDEX_FILE) or not os.path.exists(METADATA_FILE):
@@ -52,7 +55,7 @@ index = faiss.read_index(INDEX_FILE)
 total_vectors = index.ntotal
 print(f"Total Vectors Indexed: {total_vectors:,}")
 
-print("Building seek table for document lookups...")
+print("Building seek table for instant document lookups...")
 doc_offsets = []
 with open(METADATA_FILE, "rb") as f:
     offset = 0
@@ -72,26 +75,11 @@ def get_metadata_by_id(doc_idx: int) -> dict:
                     return {}
     return {}
 
-print(f"Loading ONNX Model: {MODEL_NAME}...")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, use_fast=True)
-ort_model = ORTModelForFeatureExtraction.from_pretrained(MODEL_NAME, export=True)
+print(f"Loading Embedding Model: {MODEL_NAME}...")
+embed_model = SentenceTransformer(MODEL_NAME)
 
-def encode_query(text: str) -> np.ndarray:
-    """Encodes query into native 384d semantic vector space using ONNX."""
-    inputs = tokenizer(f"query: {text}", return_tensors="np", max_length=128, padding=True, truncation=True)
-    outputs = ort_model(**inputs)
-    last_hidden_state = outputs.last_hidden_state  # shape: (1, seq_len, 384)
-    attention_mask = np.expand_dims(inputs["attention_mask"], axis=-1)
-    
-    sum_embeddings = np.sum(last_hidden_state * attention_mask, axis=1)
-    sum_mask = np.clip(attention_mask.sum(axis=1), a_min=1e-9, a_max=None)
-    mean_pooled = sum_embeddings / sum_mask
-    
-    norm = np.linalg.norm(mean_pooled, axis=1, keepdims=True)
-    norm[norm == 0] = 1.0
-    return (mean_pooled / norm).astype("float32")
-
-_ = encode_query("warmup query")
+with torch.inference_mode():
+    _ = embed_model.encode(["query: warmup"], normalize_embeddings=True, convert_to_numpy=True)
 print("System Warmup Complete. Pipeline Ready!\n")
 
 
@@ -186,7 +174,7 @@ def query_safety_guardrail(query: str) -> bool:
 
 
 # ============================================================
-# 4. STRICT GROUNDING & VECTOR RETRIEVAL
+# 4. VECTOR RETRIEVAL & GROUNDING GUARDRAIL
 # ============================================================
 def grounding_guardrail(passages: List[dict], query: str, threshold: float = 0.82) -> bool:
     if not passages:
@@ -197,7 +185,13 @@ def retrieve_passages(query: str, top_k: int = 3, target_lang: Optional[str] = N
     t0 = time.perf_counter()
     effective_lang = classify_indic_language(query, target_lang)
 
-    q_emb = encode_query(query)
+    with torch.inference_mode():
+        q_emb = embed_model.encode(
+            [f"query: {query}"],
+            normalize_embeddings=True,
+            convert_to_numpy=True
+        ).astype("float32")
+
     scores, indices = index.search(q_emb, min(50, index.ntotal))
     retrieval_time_ms = (time.perf_counter() - t0) * 1000.0
 
@@ -219,7 +213,7 @@ def retrieve_passages(query: str, top_k: int = 3, target_lang: Optional[str] = N
                 if len(valid_results) >= top_k:
                     break
 
-    print(f"[RAG Retrieval] Language: {effective_lang.upper()} | Clean Grounded Matches: {len(valid_results)} | Latency: {retrieval_time_ms:.2f}ms")
+    print(f"[RAG Retrieval] Language: {effective_lang.upper()} | Matches: {len(valid_results)} | Latency: {retrieval_time_ms:.2f}ms")
     return valid_results, retrieval_time_ms, effective_lang
 
 
