@@ -1,4 +1,4 @@
-# Virtual Environments
+# Python
 venv/
 .venv/
 env/
@@ -6,13 +6,27 @@ ENV/
 __pycache__/
 *.pyc
 
-# Node / Frontend
+# Node
 node_modules/
 dist/
+
+# Environment
 .env
 .env.local
 
-# Large Raw Datasets (not needed in production runtime if index is pre-built)
+# Raw datasets
 *.parquet
 *.csv
 raw_data/
+
+# Training / preprocessing data
+bilingual_documents.jsonl
+documents.jsonl
+chunks_fixed.jsonl
+chunks_recursive.jsonl
+chunks_sentence.jsonl
+sentence_metadata.json
+all_indic_docs.jsonl
+
+# Unused FAISS indexes
+sentence.index
