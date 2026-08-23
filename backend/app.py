@@ -88,33 +88,45 @@ def get_metadata_by_id(doc_idx: int) -> dict:
 # ============================================================
 # 3. HUGGING FACE INFERENCE EMBEDDER (ACCURATE INDIC VECTORS)
 # ============================================================
+
 def encode_with_hf_model(query_text: str) -> Optional[np.ndarray]:
-    """Generates exact 384d semantic vectors from intfloat/multilingual-e5-small."""
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN and not HF_TOKEN.startswith("hf_xxx") else {}
+    """Fetches exact 384d semantic vectors from Hugging Face Inference."""
+    token = os.getenv("HF_TOKEN", "").strip()
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    
+    # multilingual-e5 models strictly require 'query: ' prefix
     payload = {
-        "inputs": [f"query: {query_text.strip()}"],
+        "inputs": f"query: {query_text.strip()}",
         "options": {"wait_for_model": True, "use_cache": True}
     }
+    
     try:
-        res = http_session.post(HF_API_URL, headers=headers, json=payload, timeout=4.0)
+        res = http_session.post(
+            "https://api-inference.huggingface.co/pipeline/feature-extraction/intfloat/multilingual-e5-small",
+            headers=headers,
+            json=payload,
+            timeout=8.0
+        )
         if res.status_code == 200:
             data = res.json()
             emb = np.array(data, dtype="float32")
-            if emb.ndim == 3:
-                emb = emb.mean(axis=1)
-            elif emb.ndim == 2 and emb.shape[0] > 1:
+            
+            # Reshape based on HF feature extraction output format
+            if emb.ndim == 2:
                 emb = emb.mean(axis=0, keepdims=True)
             elif emb.ndim == 1:
                 emb = np.expand_dims(emb, axis=0)
+            elif emb.ndim == 3:
+                emb = emb.mean(axis=1)
+
             norm = np.linalg.norm(emb, axis=1, keepdims=True)
             norm[norm == 0] = 1.0
             return (emb / norm).astype("float32")
         else:
-            print(f"[HF API Notice] Status: {res.status_code} | Body: {res.text[:100]}")
+            print(f"[HF Error {res.status_code}] {res.text}")
     except Exception as e:
-        print(f"[HF API Exception] {e}")
+        print(f"[HF Exception] {e}")
     return None
-
 
 # ============================================================
 # 4. INDIC SCRIPT CLASSIFIER
