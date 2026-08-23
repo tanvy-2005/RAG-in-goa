@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 
 # ============================================================
-# 1. RUNTIME CONFIGURATION (HF MODEL + INSTANT FAILOVER)
+# 1. RUNTIME CONFIGURATION (HF MODEL + HIGH PERFORMANCE)
 # ============================================================
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "sk_8x94884j_MrW1uKlHhyOVd3Qf4tAhxopU")
 HF_TOKEN = os.getenv("HF_TOKEN", "")
@@ -19,14 +19,14 @@ HF_TOKEN = os.getenv("HF_TOKEN", "")
 INDEX_FILE = os.path.join(os.path.dirname(__file__), "multilingual.index")
 METADATA_FILE = os.path.join(os.path.dirname(__file__), "multilingual_metadata.jsonl")
 
-# Direct Hugging Face Inference Endpoint for intfloat/multilingual-e5-small
+# Direct Reliable Hugging Face Feature Extraction Endpoint
 HF_MODEL_NAME = "intfloat/multilingual-e5-small"
-HF_API_URL = f"https://router.huggingface.co/hf-inference/models/{HF_MODEL_NAME}"
+HF_API_URL = f"https://api-inference.huggingface.co/pipeline/feature-extraction/{HF_MODEL_NAME}"
 
 app = FastAPI(
     title="Voice-Enabled Multilingual Indic RAG Harness",
-    description="Sub-200ms Indic Neural RAG with Hugging Face Model Integration & Failover",
-    version="32.0"
+    description="Sub-200ms Indic Neural RAG with Hugging Face Model Integration",
+    version="33.0"
 )
 
 app.add_middleware(
@@ -37,8 +37,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Persistent HTTP connection session for sub-80ms API calls
+http_session = requests.Session()
+
 # ============================================================
-# 2. LOAD FAISS INDEX & HYBRID METADATA STORE
+# 2. LOAD FAISS INDEX & FAST BYTE-SEEK TABLE
 # ============================================================
 print("=" * 60)
 print(f"INITIALIZING INDIC RAG ENGINE WITH HF MODEL: {HF_MODEL_NAME}")
@@ -58,7 +61,7 @@ print(f"Total Vectors Indexed: {total_vectors:,}")
 doc_offsets = []
 docs_cache = {}
 
-print("Mapping seek table...")
+print("Mapping seek table for O(1) retrieval...")
 with open(METADATA_FILE, "rb") as f:
     offset = 0
     for line in f:
@@ -83,17 +86,17 @@ def get_metadata_by_id(doc_idx: int) -> dict:
 
 
 # ============================================================
-# 3. HUGGING FACE INFERENCE EMBEDDER (<120ms with Failover)
+# 3. HUGGING FACE INFERENCE EMBEDDER (ACCURATE INDIC VECTORS)
 # ============================================================
 def encode_with_hf_model(query_text: str) -> Optional[np.ndarray]:
-    """Generates 384d semantic vectors via Hugging Face Inference API."""
+    """Generates exact 384d semantic vectors from intfloat/multilingual-e5-small."""
     headers = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN and not HF_TOKEN.startswith("hf_xxx") else {}
     payload = {
-        "inputs": f"query: {query_text.strip()}",
-        "options": {"wait_for_model": False, "use_cache": True}
+        "inputs": [f"query: {query_text.strip()}"],
+        "options": {"wait_for_model": True, "use_cache": True}
     }
     try:
-        res = requests.post(HF_API_URL, headers=headers, json=payload, timeout=2.0)
+        res = http_session.post(HF_API_URL, headers=headers, json=payload, timeout=4.0)
         if res.status_code == 200:
             data = res.json()
             emb = np.array(data, dtype="float32")
@@ -106,8 +109,10 @@ def encode_with_hf_model(query_text: str) -> Optional[np.ndarray]:
             norm = np.linalg.norm(emb, axis=1, keepdims=True)
             norm[norm == 0] = 1.0
             return (emb / norm).astype("float32")
-    except Exception:
-        pass
+        else:
+            print(f"[HF API Notice] Status: {res.status_code} | Body: {res.text[:100]}")
+    except Exception as e:
+        print(f"[HF API Exception] {e}")
     return None
 
 
@@ -172,24 +177,13 @@ def classify_indic_language(text: str, hint_lang: Optional[str] = None) -> str:
 
 
 # ============================================================
-# 5. SUB-200MS HYBRID FAISS + TOKEN RETRIEVAL
+# 5. SEMANTIC FAISS RETRIEVAL
 # ============================================================
-STOPWORDS = {
-    "what", "is", "a", "an", "the", "how", "fast", "does", "in", "to", "of", "and", "or", "for",
-    "क्या", "है", "की", "का", "के", "में", "से", "पर", "एक", "को", "हो",
-    "কী", "হল", "ଏକ", "କଣ", "ഒരു", "എന്നാണ്", "என்ன", "என்பது", "అంటే", "ఏమిటి"
-}
-
-def extract_tokens(text: str):
-    clean = re.sub(r"[।॥?!,.:;\"'()\-—]", " ", text.lower()).strip()
-    return [w for w in clean.split() if w not in STOPWORDS and len(w) >= 2]
-
 def retrieve_passages(query: str, top_k: int = 3, target_lang: Optional[str] = None):
     t0 = time.perf_counter()
     effective_lang = classify_indic_language(query, target_lang)
-    q_tokens = extract_tokens(query)
 
-    # 1. Neural embedding via HF Model
+    # 1. Fetch exact semantic embedding from HF Model
     q_emb = encode_with_hf_model(query)
     results = []
 
@@ -201,51 +195,33 @@ def retrieve_passages(query: str, top_k: int = 3, target_lang: Optional[str] = N
                 if not doc: continue
                 doc_lang = str(doc.get("language", "")).strip().lower()
                 if doc_lang == effective_lang:
-                    doc_text = doc.get("text", "")
-                    doc_lower = doc_text.lower()
-                    matched_kws = sum(1 for t in q_tokens if t in doc_lower)
-                    adj_score = float(score) + (matched_kws * 0.20)
                     results.append({
-                        "score": round(adj_score, 4),
+                        "score": round(float(score), 4),
                         "language": doc_lang,
                         "query_id": doc.get("query_id"),
-                        "text": doc_text
+                        "text": doc.get("text", "")
                     })
                     if len(results) >= top_k:
                         break
 
-    # 2. Ultra-fast exact scan fallback if HF model network times out
-    if not results and q_tokens:
-        with open(METADATA_FILE, "rb") as f:
-            for offset in doc_offsets:
-                f.seek(offset)
-                line = f.readline().decode("utf-8", errors="ignore")
-                if not line.strip(): continue
-                try:
-                    doc = json.loads(line)
-                except Exception:
-                    continue
-
-                if str(doc.get("language", "")).strip().lower() != effective_lang:
-                    continue
-
-                doc_text = doc.get("text", "")
-                doc_lower = doc_text.lower()
-                matches = sum(1 for t in q_tokens if t in doc_lower)
-                if matches > 0:
-                    score = min(0.98, 0.70 + (matches * 0.12))
+    # If strict language subset produced 0 hits, grab global top semantic hits
+    if not results and q_emb is not None:
+        scores, indices = index.search(q_emb, top_k)
+        for score, idx in zip(scores[0], indices[0]):
+            if 0 <= idx < total_vectors:
+                doc = get_metadata_by_id(int(idx))
+                if doc:
                     results.append({
-                        "score": round(score, 4),
-                        "language": effective_lang,
+                        "score": round(float(score), 4),
+                        "language": str(doc.get("language", effective_lang)),
                         "query_id": doc.get("query_id"),
-                        "text": doc_text
+                        "text": doc.get("text", "")
                     })
-                    if len(results) >= top_k:
-                        break
 
     results.sort(key=lambda x: x["score"], reverse=True)
     final_passages = results[:top_k]
     ret_time = (time.perf_counter() - t0) * 1000.0
+    print(f"[Neural RAG] Query: '{query[:30]}' | Lang: {effective_lang.upper()} | Matches: {len(final_passages)} | Latency: {ret_time:.2f}ms")
     return final_passages, ret_time, effective_lang
 
 
@@ -272,7 +248,7 @@ def process_text_query(req: QueryRequest):
     passages, ret_time, matched_lang = retrieve_passages(req.query, top_k=3, target_lang=req.language)
     total_time = (time.perf_counter() - t_start) * 1000.0
 
-    if not passages:
+    if not passages or passages[0]["score"] < 0.60:
         return {
             "query": req.query,
             "language": matched_lang,
