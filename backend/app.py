@@ -13,11 +13,15 @@ from typing import List, Optional
 from transformers import AutoTokenizer, AutoModel
 
 # ============================================================
-# 1. RUNTIME CONFIGURATION (LOCAL EMBEDDER - NO EXTERNAL API)
+# 1. RUNTIME CONFIGURATION
 # ============================================================
 torch.set_num_threads(1)
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["OMP_NUM_THREADS"] = "1"
+
+HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
+if HF_TOKEN:
+    os.environ["HUGGING_FACE_HUB_TOKEN"] = HF_TOKEN
 
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "sk_8x94884j_MrW1uKlHhyOVd3Qf4tAhxopU")
 INDEX_FILE = os.path.join(os.path.dirname(__file__), "multilingual.index")
@@ -26,8 +30,8 @@ MODEL_NAME = "intfloat/multilingual-e5-small"
 
 app = FastAPI(
     title="Voice-Enabled Multilingual Indic RAG Harness",
-    description="Sub-100ms Native Neural Indic Vector Search Engine",
-    version="37.0"
+    description="Sub-100ms Indic Vector Search Engine",
+    version="38.0"
 )
 
 app.add_middleware(
@@ -39,10 +43,10 @@ app.add_middleware(
 )
 
 # ============================================================
-# 2. LOAD FAISS INDEX, DISK MAP & TRANSFORMER MODEL
+# 2. LOAD FAISS INDEX & DATASET DISK MAP
 # ============================================================
 print("=" * 60)
-print(f"INITIALIZING MULTILINGUAL INDIC NEURAL RAG ENGINE")
+print("INITIALIZING MULTILINGUAL INDIC NEURAL RAG ENGINE")
 print("=" * 60)
 
 if not os.path.exists(INDEX_FILE) or not os.path.exists(METADATA_FILE):
@@ -59,7 +63,7 @@ print(f"Total Vectors Indexed: {total_vectors:,}")
 doc_offsets = []
 docs_cache = {}
 
-print("Mapping seek table...")
+print("Building disk seek map...")
 with open(METADATA_FILE, "rb") as f:
     offset = 0
     for line in f:
@@ -83,12 +87,14 @@ def get_metadata_by_id(doc_idx: int) -> dict:
     return {}
 
 print(f"Loading Neural Embedding Model: {MODEL_NAME}...")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, use_fast=True)
-embed_model = AutoModel.from_pretrained(MODEL_NAME, low_cpu_mem_usage=True)
+auth_token = HF_TOKEN if HF_TOKEN and not HF_TOKEN.startswith("hf_xxx") else None
+
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, use_fast=True, token=auth_token)
+embed_model = AutoModel.from_pretrained(MODEL_NAME, low_cpu_mem_usage=True, token=auth_token)
 embed_model.eval()
 
 def encode_query(query_text: str) -> np.ndarray:
-    """Exact multilingual-e5 embeddings computed locally with zero API latency."""
+    """Exact multilingual-e5 embeddings computed locally."""
     formatted = f"query: {query_text.strip()}"
     inputs = tokenizer(formatted, return_tensors="pt", max_length=128, padding=True, truncation=True)
     with torch.inference_mode():
@@ -166,7 +172,7 @@ def classify_indic_language(text: str, hint_lang: Optional[str] = None) -> str:
 
 
 # ============================================================
-# 4. VECTOR RETRIEVAL ENGINE
+# 4. GLOBAL SEMANTIC FAISS RETRIEVAL
 # ============================================================
 def retrieve_passages(query: str, top_k: int = 3, target_lang: Optional[str] = None):
     t0 = time.perf_counter()
@@ -175,47 +181,37 @@ def retrieve_passages(query: str, top_k: int = 3, target_lang: Optional[str] = N
     q_emb = encode_query(query)
     scores, indices = index.search(q_emb, min(100, index.ntotal))
 
-    results = []
+    lang_matches = []
+    global_matches = []
+
     for score, idx in zip(scores[0], indices[0]):
         if 0 <= idx < total_vectors:
             doc = get_metadata_by_id(int(idx))
             if not doc:
                 continue
-            doc_lang = str(doc.get("language", "")).strip().lower()
+
+            doc_lang = normalize_lang_code(str(doc.get("language", "")))
+            item = {
+                "score": round(float(score), 4),
+                "language": doc_lang or effective_lang,
+                "query_id": doc.get("query_id"),
+                "text": doc.get("text", "")
+            }
+            
             if doc_lang == effective_lang:
-                results.append({
-                    "score": round(float(score), 4),
-                    "language": doc_lang,
-                    "query_id": doc.get("query_id"),
-                    "text": doc.get("text", "")
-                })
-                if len(results) >= top_k:
-                    break
+                lang_matches.append(item)
+            global_matches.append(item)
 
-    # Fallback to top global matches if language tag is broad
-    if not results:
-        for score, idx in zip(scores[0], indices[0]):
-            if 0 <= idx < total_vectors:
-                doc = get_metadata_by_id(int(idx))
-                if doc:
-                    results.append({
-                        "score": round(float(score), 4),
-                        "language": str(doc.get("language", effective_lang)),
-                        "query_id": doc.get("query_id"),
-                        "text": doc.get("text", "")
-                    })
-                    if len(results) >= top_k:
-                        break
+    # Use language-specific matches if found; otherwise use top global semantic hits
+    results = lang_matches[:top_k] if len(lang_matches) >= 1 else global_matches[:top_k]
 
-    results.sort(key=lambda x: x["score"], reverse=True)
-    final_passages = results[:top_k]
     ret_time = (time.perf_counter() - t0) * 1000.0
-    print(f"[Neural RAG] Query: '{query[:30]}' | Lang: {effective_lang.upper()} | Matches: {len(final_passages)} | Latency: {ret_time:.2f}ms")
-    return final_passages, ret_time, effective_lang
+    print(f"[Neural RAG] Query: '{query[:30]}' | Matches: {len(results)} | Latency: {ret_time:.2f}ms")
+    return results, ret_time, effective_lang
 
 
 # ============================================================
-# 5. FASTAPI ENDPOINTS
+# 5. API ENDPOINTS
 # ============================================================
 class QueryRequest(BaseModel):
     query: str
@@ -236,8 +232,8 @@ def process_text_query(req: QueryRequest):
     passages, ret_time, matched_lang = retrieve_passages(req.query, top_k=3, target_lang=req.language)
     total_time = (time.perf_counter() - t_start) * 1000.0
 
-    # Minimum threshold to filter out unrelated queries
-    if not passages or passages[0]["score"] < 0.50:
+    # Grounding check based on cosine similarity
+    if not passages or passages[0]["score"] < 0.35:
         return {
             "query": req.query,
             "language": matched_lang,
