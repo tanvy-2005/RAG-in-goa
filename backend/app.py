@@ -2,26 +2,32 @@ import os
 import time
 import json
 import re
-from collections import defaultdict
 import numpy as np
 import faiss
 import requests
+import torch
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
+from transformers import AutoTokenizer, AutoModel
 
 # ============================================================
-# 1. CONFIGURATION
+# 1. OPTIMIZED RUNTIME CONFIGURATION
 # ============================================================
+torch.set_num_threads(1)
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["OMP_NUM_THREADS"] = "1"
+
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "sk_8x94884j_MrW1uKlHhyOVd3Qf4tAhxopU")
 INDEX_FILE = os.path.join(os.path.dirname(__file__), "multilingual.index")
 METADATA_FILE = os.path.join(os.path.dirname(__file__), "multilingual_metadata.jsonl")
+MODEL_NAME = "intfloat/multilingual-e5-small"
 
 app = FastAPI(
     title="Voice-Enabled Multilingual Indic RAG Harness",
-    description="Sub-30ms High-Precision Indic Retrieval Engine",
-    version="25.0"
+    description="True Neural Indic Vector Search with Grounding Guardrails",
+    version="26.0"
 )
 
 app.add_middleware(
@@ -33,10 +39,10 @@ app.add_middleware(
 )
 
 # ============================================================
-# 2. IN-MEMORY HIGH-SPEED INVERTED INDEX & OFFSETS (<15MB RAM)
+# 2. LOAD FAISS INDEX, SEEK TABLE & MULTILINGUAL E5
 # ============================================================
 print("=" * 60)
-print("INITIALIZING HIGH-PRECISION INDIC RAG ENGINE")
+print("INITIALIZING MULTILINGUAL INDIC NEURAL RAG ENGINE")
 print("=" * 60)
 
 if not os.path.exists(INDEX_FILE) or not os.path.exists(METADATA_FILE):
@@ -45,41 +51,18 @@ if not os.path.exists(INDEX_FILE) or not os.path.exists(METADATA_FILE):
     if not os.path.exists(INDEX_FILE) or not os.path.exists(METADATA_FILE):
         raise FileNotFoundError("multilingual.index or multilingual_metadata.jsonl missing.")
 
+print(f"Loading FAISS Index from {INDEX_FILE}...")
+index = faiss.read_index(INDEX_FILE)
+total_vectors = index.ntotal
+print(f"Total Vectors Indexed: {total_vectors:,}")
+
+print("Building disk seek map...")
 doc_offsets = []
-inverted_index = defaultdict(list)
-doc_languages = []
-
-STOPWORDS = {
-    "what", "is", "a", "an", "the", "how", "fast", "does", "in", "to", "of", "and", "or", "for", "are", "can",
-    "क्या", "है", "की", "का", "के", "में", "से", "पर", "एक", "को", "हो",
-    "কী", "হল", "ଏକ", "କଣ", "ഒരു", "എന്നാണ്", "என்ன", "என்பது", "అంటే", "ఏమిటి"
-}
-
-def tokenize_indic(text: str) -> List[str]:
-    cleaned = re.sub(r"[।॥?!,.:;\"'()\-—\[\]{}/\\<>@#$%^&*+=~`]", " ", text.lower()).strip()
-    return [w for w in cleaned.split() if len(w) >= 2 and w not in STOPWORDS]
-
-print("Indexing dataset into fast inverted memory structure...")
 with open(METADATA_FILE, "rb") as f:
     offset = 0
-    idx = 0
     for line in f:
         doc_offsets.append(offset)
         offset += len(line)
-        try:
-            doc = json.loads(line.decode("utf-8", errors="ignore"))
-            lang = str(doc.get("language", "en")).strip().lower()
-            doc_languages.append(lang)
-            
-            # Index keywords to document IDs
-            text_tokens = tokenize_indic(doc.get("text", ""))
-            for token in set(text_tokens):
-                inverted_index[token].append(idx)
-        except Exception:
-            doc_languages.append("en")
-        idx += 1
-
-print(f"Loaded {len(doc_offsets):,} documents. Inverted Vocabulary: {len(inverted_index):,} terms.")
 
 def get_metadata_by_id(doc_idx: int) -> dict:
     if 0 <= doc_idx < len(doc_offsets):
@@ -92,6 +75,29 @@ def get_metadata_by_id(doc_idx: int) -> dict:
                 except Exception:
                     return {}
     return {}
+
+print(f"Loading Neural Embedding Model: {MODEL_NAME}...")
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, use_fast=True)
+embed_model = AutoModel.from_pretrained(MODEL_NAME, low_cpu_mem_usage=True)
+embed_model.eval()
+
+def encode_query(query_text: str) -> np.ndarray:
+    """True Multilingual-e5 neural projection (cross-lingual alignment)."""
+    # e5 requires 'query: ' prefix for accurate retrieval
+    formatted_query = f"query: {query_text.strip()}"
+    inputs = tokenizer(formatted_query, return_tensors="pt", max_length=128, padding=True, truncation=True)
+    with torch.inference_mode():
+        outputs = embed_model(**inputs)
+        mask = inputs["attention_mask"].unsqueeze(-1).expand(outputs.last_hidden_state.size()).float()
+        sum_embeddings = torch.sum(outputs.last_hidden_state * mask, 1)
+        sum_mask = torch.clamp(mask.sum(1), min=1e-9)
+        mean_pooled = sum_embeddings / sum_mask
+        normalized = torch.nn.functional.normalize(mean_pooled, p=2, dim=1)
+        return normalized.cpu().numpy().astype("float32")
+
+# Warmup run
+_ = encode_query("warmup")
+print("Neural Engine Initialized and Warmup Complete!\n")
 
 
 # ============================================================
@@ -155,55 +161,51 @@ def classify_indic_language(text: str, hint_lang: Optional[str] = None) -> str:
 
 
 # ============================================================
-# 4. SUB-20MS PRECISION RETRIEVAL PIPELINE
+# 4. TRUE VECTOR RETRIEVAL (RANK ORDERED)
 # ============================================================
 def retrieve_passages(query: str, top_k: int = 3, target_lang: Optional[str] = None):
     t0 = time.perf_counter()
     effective_lang = classify_indic_language(query, target_lang)
-    q_tokens = tokenize_indic(query)
 
-    scored_docs = defaultdict(float)
+    q_emb = encode_query(query)
+    scores, indices = index.search(q_emb, min(100, index.ntotal))
 
-    for token in q_tokens:
-        doc_ids = inverted_index.get(token, [])
-        for doc_id in doc_ids:
-            if doc_languages[doc_id] == effective_lang:
-                scored_docs[doc_id] += 1.0
-
-    # Sort top candidate doc IDs
-    sorted_candidate_ids = sorted(scored_docs.keys(), key=lambda x: scored_docs[x], reverse=True)[:25]
-    
     results = []
-    for doc_id in sorted_candidate_ids:
-        doc = get_metadata_by_id(doc_id)
-        if not doc:
-            continue
-        
-        doc_text = doc.get("text", "")
-        doc_lower = doc_text.lower()
-        
-        # Give higher priority to direct definitions or explicit answers
-        definition_bonus = 0.0
-        if any(marker in doc_lower for marker in ["definition", "is defined as", "means", "refers to", "quick answer"]):
-            definition_bonus += 0.20
-        if doc_lower.startswith(tuple(q_tokens)):
-            definition_bonus += 0.15
+    for score, idx in zip(scores[0], indices[0]):
+        if 0 <= idx < total_vectors:
+            doc = get_metadata_by_id(int(idx))
+            if not doc:
+                continue
+            
+            doc_lang = str(doc.get("language", "")).strip().lower()
+            if doc_lang == effective_lang:
+                results.append({
+                    "score": round(float(score), 4),
+                    "language": doc_lang,
+                    "query_id": doc.get("query_id"),
+                    "text": doc.get("text", "")
+                })
+                if len(results) >= top_k:
+                    break
 
-        base_score = min(0.95, 0.70 + (scored_docs[doc_id] * 0.08) + definition_bonus)
+    # If strict language match has 0 hits, fallback to top semantic hits
+    if not results:
+        for score, idx in zip(scores[0], indices[0]):
+            if 0 <= idx < total_vectors:
+                doc = get_metadata_by_id(int(idx))
+                if doc:
+                    results.append({
+                        "score": round(float(score), 4),
+                        "language": str(doc.get("language", effective_lang)),
+                        "query_id": doc.get("query_id"),
+                        "text": doc.get("text", "")
+                    })
+                    if len(results) >= top_k:
+                        break
 
-        results.append({
-            "score": round(base_score, 4),
-            "language": effective_lang,
-            "query_id": doc.get("query_id"),
-            "text": doc_text
-        })
-
-    results.sort(key=lambda x: x["score"], reverse=True)
-    final_passages = results[:top_k]
-    
     ret_time = (time.perf_counter() - t0) * 1000.0
-    print(f"[RAG High-Speed] Lang: {effective_lang.upper()} | Matches: {len(final_passages)} | Latency: {ret_time:.2f}ms")
-    return final_passages, ret_time, effective_lang
+    print(f"[Neural RAG] Lang: {effective_lang.upper()} | Matches: {len(results)} | FAISS Latency: {ret_time:.2f}ms")
+    return results, ret_time, effective_lang
 
 
 # ============================================================
@@ -218,7 +220,7 @@ def health_check():
     return {
         "status": "online",
         "service": "Voice-Enabled Multilingual Indic RAG Harness",
-        "indexed_records": len(doc_offsets),
+        "vectors_indexed": index.ntotal,
         "docs_url": "/docs"
     }
 
@@ -228,7 +230,7 @@ def process_text_query(req: QueryRequest):
     passages, ret_time, matched_lang = retrieve_passages(req.query, top_k=3, target_lang=req.language)
     total_time = (time.perf_counter() - t_start) * 1000.0
 
-    if not passages:
+    if not passages or passages[0]["score"] < 0.70:
         return {
             "query": req.query,
             "language": matched_lang,
@@ -237,7 +239,7 @@ def process_text_query(req: QueryRequest):
             "passages": [],
             "latency_ms": round(total_time, 2),
             "retrieval_ms": round(ret_time, 2),
-            "passed_target_200ms": True
+            "passed_target_200ms": bool(total_time < 200.0)
         }
 
     return {
@@ -248,7 +250,7 @@ def process_text_query(req: QueryRequest):
         "passages": passages,
         "latency_ms": round(total_time, 2),
         "retrieval_ms": round(ret_time, 2),
-        "passed_target_200ms": True
+        "passed_target_200ms": bool(total_time < 200.0)
     }
 
 @app.post("/api/voice-ask")
@@ -279,6 +281,7 @@ async def process_voice_query(
         res = requests.post(url, headers=headers, files=files, data=data, timeout=15)
         if res.status_code == 200:
             transcript = res.json().get("transcript", "").strip()
+            print(f"[Sarvam STT] Transcribed: '{transcript}'")
     except Exception as e:
         print(f"[STT Error] {e}")
 
