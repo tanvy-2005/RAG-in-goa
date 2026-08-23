@@ -2,6 +2,7 @@ import os
 import time
 import json
 import re
+import threading
 import torch
 import numpy as np
 import faiss
@@ -26,7 +27,7 @@ MODEL_NAME = "intfloat/multilingual-e5-small"
 app = FastAPI(
     title="Voice-Enabled Multilingual Indic RAG Harness",
     description="Sub-200ms 14-Language Indic Vector Search, Sarvam STT & Strict Grounding Engine",
-    version="18.0"
+    version="19.0"
 )
 
 app.add_middleware(
@@ -38,10 +39,10 @@ app.add_middleware(
 )
 
 # ============================================================
-# 2. LOAD FAISS INDEX, SEEK TABLE & EMBEDDINGS
+# 2. LOAD FAISS INDEX, SEEK TABLE & ASYNC EMBEDDER
 # ============================================================
 print("=" * 60)
-print("INITIALIZING MULTILINGUAL INDIC RAG ENGINE (RAILWAY READY)")
+print("INITIALIZING MULTILINGUAL INDIC RAG ENGINE (FAST BIND)")
 print("=" * 60)
 
 if not os.path.exists(INDEX_FILE) or not os.path.exists(METADATA_FILE):
@@ -75,12 +76,32 @@ def get_metadata_by_id(doc_idx: int) -> dict:
                     return {}
     return {}
 
-print(f"Loading Embedding Model: {MODEL_NAME}...")
-embed_model = SentenceTransformer(MODEL_NAME)
+embed_model = None
+model_ready = False
 
-with torch.inference_mode():
-    _ = embed_model.encode(["query: warmup"], normalize_embeddings=True, convert_to_numpy=True)
-print("System Warmup Complete. Pipeline Ready!\n")
+def load_model_background():
+    global embed_model, model_ready
+    print(f"Background Loading Embedding Model: {MODEL_NAME}...")
+    embed_model = SentenceTransformer(MODEL_NAME)
+    with torch.inference_mode():
+        _ = embed_model.encode(["query: warmup"], normalize_embeddings=True, convert_to_numpy=True)
+    model_ready = True
+    print("Embedding Model Loaded Successfully! Pipeline Fully Ready.")
+
+# Start model loading in a background daemon thread so Uvicorn boots in 0.5s
+threading.Thread(target=load_model_background, daemon=True).start()
+
+def encode_query(query_text: str) -> np.ndarray:
+    global embed_model, model_ready
+    # Wait if a query arrives while model is still finishing its 10-second initial download
+    while not model_ready or embed_model is None:
+        time.sleep(0.5)
+    with torch.inference_mode():
+        return embed_model.encode(
+            [f"query: {query_text}"],
+            normalize_embeddings=True,
+            convert_to_numpy=True
+        ).astype("float32")
 
 
 # ============================================================
@@ -174,7 +195,7 @@ def query_safety_guardrail(query: str) -> bool:
 
 
 # ============================================================
-# 4. VECTOR RETRIEVAL & GROUNDING GUARDRAIL
+# 4. VECTOR RETRIEVAL & GROUNDING
 # ============================================================
 def grounding_guardrail(passages: List[dict], query: str, threshold: float = 0.82) -> bool:
     if not passages:
@@ -185,13 +206,7 @@ def retrieve_passages(query: str, top_k: int = 3, target_lang: Optional[str] = N
     t0 = time.perf_counter()
     effective_lang = classify_indic_language(query, target_lang)
 
-    with torch.inference_mode():
-        q_emb = embed_model.encode(
-            [f"query: {query}"],
-            normalize_embeddings=True,
-            convert_to_numpy=True
-        ).astype("float32")
-
+    q_emb = encode_query(query)
     scores, indices = index.search(q_emb, min(50, index.ntotal))
     retrieval_time_ms = (time.perf_counter() - t0) * 1000.0
 
@@ -228,6 +243,7 @@ class QueryRequest(BaseModel):
 def health_check():
     return {
         "status": "online",
+        "model_loaded": model_ready,
         "service": "Voice-Enabled Multilingual Indic RAG Harness",
         "vectors_indexed": index.ntotal,
         "docs_url": "/docs"
