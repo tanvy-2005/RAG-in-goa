@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 
 # ============================================================
-# 1. RUNTIME CONFIGURATION (HF MODEL + HIGH PERFORMANCE)
+# 1. RUNTIME CONFIGURATION (HF MODEL & TOKENS)
 # ============================================================
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "sk_8x94884j_MrW1uKlHhyOVd3Qf4tAhxopU")
 HF_TOKEN = os.getenv("HF_TOKEN", "")
@@ -19,14 +19,13 @@ HF_TOKEN = os.getenv("HF_TOKEN", "")
 INDEX_FILE = os.path.join(os.path.dirname(__file__), "multilingual.index")
 METADATA_FILE = os.path.join(os.path.dirname(__file__), "multilingual_metadata.jsonl")
 
-# Direct Reliable Hugging Face Feature Extraction Endpoint
 HF_MODEL_NAME = "intfloat/multilingual-e5-small"
 HF_API_URL = f"https://api-inference.huggingface.co/pipeline/feature-extraction/{HF_MODEL_NAME}"
 
 app = FastAPI(
     title="Voice-Enabled Multilingual Indic RAG Harness",
     description="Sub-200ms Indic Neural RAG with Hugging Face Model Integration",
-    version="33.0"
+    version="35.0"
 )
 
 app.add_middleware(
@@ -37,11 +36,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Persistent HTTP connection session for sub-80ms API calls
 http_session = requests.Session()
 
 # ============================================================
-# 2. LOAD FAISS INDEX & FAST BYTE-SEEK TABLE
+# 2. LOAD FAISS INDEX & FAST DISK MAP
 # ============================================================
 print("=" * 60)
 print(f"INITIALIZING INDIC RAG ENGINE WITH HF MODEL: {HF_MODEL_NAME}")
@@ -61,7 +59,7 @@ print(f"Total Vectors Indexed: {total_vectors:,}")
 doc_offsets = []
 docs_cache = {}
 
-print("Mapping seek table for O(1) retrieval...")
+print("Mapping seek table...")
 with open(METADATA_FILE, "rb") as f:
     offset = 0
     for line in f:
@@ -86,47 +84,38 @@ def get_metadata_by_id(doc_idx: int) -> dict:
 
 
 # ============================================================
-# 3. HUGGING FACE INFERENCE EMBEDDER (ACCURATE INDIC VECTORS)
+# 3. HUGGING FACE INFERENCE EMBEDDER (WITH HF_TOKEN)
 # ============================================================
-
 def encode_with_hf_model(query_text: str) -> Optional[np.ndarray]:
-    """Fetches exact 384d semantic vectors from Hugging Face Inference."""
-    token = os.getenv("HF_TOKEN", "").strip()
+    """Generates exact 384d semantic vectors from Hugging Face Inference API."""
+    token = os.getenv("HF_TOKEN", HF_TOKEN).strip()
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     
-    # multilingual-e5 models strictly require 'query: ' prefix
     payload = {
-        "inputs": f"query: {query_text.strip()}",
+        "inputs": [f"query: {query_text.strip()}"],
         "options": {"wait_for_model": True, "use_cache": True}
     }
     
     try:
-        res = http_session.post(
-            "https://api-inference.huggingface.co/pipeline/feature-extraction/intfloat/multilingual-e5-small",
-            headers=headers,
-            json=payload,
-            timeout=8.0
-        )
+        res = http_session.post(HF_API_URL, headers=headers, json=payload, timeout=5.0)
         if res.status_code == 200:
             data = res.json()
             emb = np.array(data, dtype="float32")
-            
-            # Reshape based on HF feature extraction output format
-            if emb.ndim == 2:
+            if emb.ndim == 3:
+                emb = emb.mean(axis=1)
+            elif emb.ndim == 2 and emb.shape[0] > 1:
                 emb = emb.mean(axis=0, keepdims=True)
             elif emb.ndim == 1:
                 emb = np.expand_dims(emb, axis=0)
-            elif emb.ndim == 3:
-                emb = emb.mean(axis=1)
-
             norm = np.linalg.norm(emb, axis=1, keepdims=True)
             norm[norm == 0] = 1.0
             return (emb / norm).astype("float32")
         else:
-            print(f"[HF Error {res.status_code}] {res.text}")
+            print(f"[HF API Notice] Status: {res.status_code} | Body: {res.text[:100]}")
     except Exception as e:
-        print(f"[HF Exception] {e}")
+        print(f"[HF API Exception] {e}")
     return None
+
 
 # ============================================================
 # 4. INDIC SCRIPT CLASSIFIER
@@ -195,7 +184,6 @@ def retrieve_passages(query: str, top_k: int = 3, target_lang: Optional[str] = N
     t0 = time.perf_counter()
     effective_lang = classify_indic_language(query, target_lang)
 
-    # 1. Fetch exact semantic embedding from HF Model
     q_emb = encode_with_hf_model(query)
     results = []
 
@@ -204,7 +192,8 @@ def retrieve_passages(query: str, top_k: int = 3, target_lang: Optional[str] = N
         for score, idx in zip(scores[0], indices[0]):
             if 0 <= idx < total_vectors:
                 doc = get_metadata_by_id(int(idx))
-                if not doc: continue
+                if not doc:
+                    continue
                 doc_lang = str(doc.get("language", "")).strip().lower()
                 if doc_lang == effective_lang:
                     results.append({
@@ -216,19 +205,20 @@ def retrieve_passages(query: str, top_k: int = 3, target_lang: Optional[str] = N
                     if len(results) >= top_k:
                         break
 
-    # If strict language subset produced 0 hits, grab global top semantic hits
-    if not results and q_emb is not None:
-        scores, indices = index.search(q_emb, top_k)
-        for score, idx in zip(scores[0], indices[0]):
-            if 0 <= idx < total_vectors:
-                doc = get_metadata_by_id(int(idx))
-                if doc:
-                    results.append({
-                        "score": round(float(score), 4),
-                        "language": str(doc.get("language", effective_lang)),
-                        "query_id": doc.get("query_id"),
-                        "text": doc.get("text", "")
-                    })
+        # Fallback to top global matches if strict language filter had 0 results
+        if not results:
+            for score, idx in zip(scores[0], indices[0]):
+                if 0 <= idx < total_vectors:
+                    doc = get_metadata_by_id(int(idx))
+                    if doc:
+                        results.append({
+                            "score": round(float(score), 4),
+                            "language": str(doc.get("language", effective_lang)),
+                            "query_id": doc.get("query_id"),
+                            "text": doc.get("text", "")
+                        })
+                        if len(results) >= top_k:
+                            break
 
     results.sort(key=lambda x: x["score"], reverse=True)
     final_passages = results[:top_k]
@@ -250,6 +240,7 @@ def health_check():
         "status": "online",
         "service": "Voice-Enabled Multilingual Indic RAG Harness",
         "hf_model": HF_MODEL_NAME,
+        "hf_token_configured": bool(os.getenv("HF_TOKEN")),
         "vectors_indexed": index.ntotal,
         "docs_url": "/docs"
     }
