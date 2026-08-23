@@ -22,12 +22,13 @@ os.environ["OMP_NUM_THREADS"] = "1"
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "sk_8x94884j_MrW1uKlHhyOVd3Qf4tAhxopU")
 INDEX_FILE = os.path.join(os.path.dirname(__file__), "multilingual.index")
 METADATA_FILE = os.path.join(os.path.dirname(__file__), "multilingual_metadata.jsonl")
-MODEL_NAME = "intfloat/multilingual-e5-small"
+LOCAL_MODEL_DIR = os.path.join(os.path.dirname(__file__), "model_cache")
+FALLBACK_MODEL_NAME = "intfloat/multilingual-e5-small"
 
 app = FastAPI(
     title="Voice-Enabled Multilingual Indic RAG Harness",
-    description="True Neural Indic Vector Search with Grounding Guardrails",
-    version="26.0"
+    description="True Neural Indic Vector Search with Pre-cached E5 Embeddings",
+    version="27.0"
 )
 
 app.add_middleware(
@@ -39,7 +40,7 @@ app.add_middleware(
 )
 
 # ============================================================
-# 2. LOAD FAISS INDEX, SEEK TABLE & MULTILINGUAL E5
+# 2. LOAD FAISS INDEX, SEEK TABLE & PRE-CACHED E5
 # ============================================================
 print("=" * 60)
 print("INITIALIZING MULTILINGUAL INDIC NEURAL RAG ENGINE")
@@ -76,14 +77,14 @@ def get_metadata_by_id(doc_idx: int) -> dict:
                     return {}
     return {}
 
-print(f"Loading Neural Embedding Model: {MODEL_NAME}...")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, use_fast=True)
-embed_model = AutoModel.from_pretrained(MODEL_NAME, low_cpu_mem_usage=True)
+model_source = LOCAL_MODEL_DIR if os.path.exists(LOCAL_MODEL_DIR) else FALLBACK_MODEL_NAME
+print(f"Loading Pre-cached Neural Model from: {model_source}...")
+tokenizer = AutoTokenizer.from_pretrained(model_source, use_fast=True)
+embed_model = AutoModel.from_pretrained(model_source, low_cpu_mem_usage=True)
 embed_model.eval()
 
 def encode_query(query_text: str) -> np.ndarray:
-    """True Multilingual-e5 neural projection (cross-lingual alignment)."""
-    # e5 requires 'query: ' prefix for accurate retrieval
+    """Authentic cross-lingual vector alignment."""
     formatted_query = f"query: {query_text.strip()}"
     inputs = tokenizer(formatted_query, return_tensors="pt", max_length=128, padding=True, truncation=True)
     with torch.inference_mode():
@@ -188,7 +189,7 @@ def retrieve_passages(query: str, top_k: int = 3, target_lang: Optional[str] = N
                 if len(results) >= top_k:
                     break
 
-    # If strict language match has 0 hits, fallback to top semantic hits
+    # Fallback to nearest semantic matches regardless of strict language tag
     if not results:
         for score, idx in zip(scores[0], indices[0]):
             if 0 <= idx < total_vectors:
