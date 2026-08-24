@@ -2,6 +2,9 @@ fastapi
 uvicorn
 numpy
 faiss-cpu
-sentence-transformers[onnx]
+onnxruntime
+transformers
+huggingface-hub
 requests
 python-multipart
+sentence-transformers

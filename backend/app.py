@@ -1,19 +1,33 @@
 import os
+
+# ============================================================
+# MEMORY / CPU OPTIMIZATION
+# ============================================================
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
+
 os.environ["ORT_INTRA_OP_NUM_THREADS"] = "1"
 os.environ["ORT_INTER_OP_NUM_THREADS"] = "1"
+
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
-import resource
-print("RAM before model loading:")
-print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, "MB")
+
+# Prevent unnecessary tokenizer/model parallelism
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+
+# ============================================================
+# IMPORTS
+# ============================================================
+
 import re
 import json
 import time
-import gc
 import statistics
+
 from collections import deque
 from typing import Optional, List, Dict, Any
 
@@ -32,14 +46,11 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# ============================================================
-# SENTENCE TRANSFORMERS
-# ============================================================
-
 from sentence_transformers import SentenceTransformer
 
+
 # ============================================================
-# ENVIRONMENT VARIABLES
+# ENVIRONMENT
 # ============================================================
 
 SARVAM_API_KEY = os.getenv(
@@ -71,40 +82,30 @@ METADATA_FILE = os.path.join(
 # MODEL
 # ============================================================
 
-# IMPORTANT:
-#
-# The FAISS index was originally created using:
-#
-#     SentenceTransformer(
-#         "intfloat/multilingual-e5-small"
-#     )
-#
-# Therefore the API MUST use the same model.
-#
-# Do NOT change this to E5-large or another model unless
-# the entire FAISS index is rebuilt.
-
 MODEL_NAME = "intfloat/multilingual-e5-small"
 
 
 # ============================================================
-# RETRIEVAL CONFIGURATION
+# RETRIEVAL CONFIG
 # ============================================================
 
 TOP_K = 3
 
-SEARCH_K = 50
+# IMPORTANT:
+# We only need a small candidate set because final output
+# contains only TOP_K results.
+SEARCH_K = 10
 
 GROUNDING_THRESHOLD = 0.35
 
-MAX_CACHE_SIZE = 100
+MAX_CACHE_SIZE = 50
 
 
 # ============================================================
 # LATENCY ANALYTICS
 # ============================================================
 
-LATENCY_WINDOW_SIZE = 1000
+LATENCY_WINDOW_SIZE = 500
 
 latency_history = deque(
     maxlen=LATENCY_WINDOW_SIZE
@@ -122,7 +123,7 @@ app = FastAPI(
         "Voice → Sarvam STT → multilingual retrieval → "
         "grounded answer generation."
     ),
-    version="40.1"
+    version="41.0"
 )
 
 
@@ -136,13 +137,17 @@ app.add_middleware(
 
 
 # ============================================================
-# STARTUP VALIDATION
+# STARTUP
 # ============================================================
 
 print("=" * 70)
 print("INITIALIZING RAG-IN-GOA MULTILINGUAL RAG ENGINE")
 print("=" * 70)
 
+
+# ============================================================
+# CHECK FILES
+# ============================================================
 
 if not os.path.exists(INDEX_FILE):
 
@@ -279,10 +284,7 @@ def get_metadata_by_id(
         )
 
 
-        if (
-            len(docs_cache)
-            >= MAX_CACHE_SIZE
-        ):
+        if len(docs_cache) >= MAX_CACHE_SIZE:
 
             oldest_key = next(
                 iter(docs_cache)
@@ -320,48 +322,24 @@ print(
     f"Loading multilingual embedding model: "
     f"{MODEL_NAME}"
 )
+
+
 try:
+
     embedding_model = SentenceTransformer(
-    MODEL_NAME,
-    backend="onnx",
-    model_kwargs={
-        "file_name": "onnx/model_qint8_avx512_vnni.onnx"
-    }
-)
-    
+        MODEL_NAME,
+        backend="onnx",
+        model_kwargs={
+            "file_name":
+                "onnx/model_qint8_avx512_vnni.onnx"
+        },
+        device="cpu"
+    )
+
+
     print(
         "Embedding model loaded successfully."
     )
-
-    # --------------------------------------------------------
-    # Validate model dimension against FAISS
-    # --------------------------------------------------------
-
-    test_embedding = embedding_model.encode(
-        ["query: test"],
-        normalize_embeddings=True,
-        convert_to_numpy=True
-    )
-
-    model_dimension = test_embedding.shape[1]
-
-    print(
-        f"Embedding model dimension: "
-        f"{model_dimension}"
-    )
-
-    if model_dimension != index.d:
-
-        raise RuntimeError(
-            "Embedding model dimension does not "
-            "match FAISS index dimension. "
-            f"Model={model_dimension}, "
-            f"FAISS={index.d}"
-        )
-
-    del test_embedding
-
-    gc.collect()
 
 
 except Exception as e:
@@ -375,6 +353,23 @@ except Exception as e:
     )
 
     raise
+
+
+# ============================================================
+# IMPORTANT
+#
+# DO NOT run a model.encode() dimension test here.
+#
+# The model is known to produce 384-dimensional embeddings
+# and the FAISS index is also 384-dimensional.
+#
+# Running another encode during startup wastes RAM/CPU.
+# ============================================================
+
+
+print(
+    f"Embedding model dimension: {index.d}"
+)
 
 
 # ============================================================
@@ -437,6 +432,10 @@ LANG_ALIASES = {
 }
 
 
+# ============================================================
+# SARVAM LANGUAGE MAP
+# ============================================================
+
 SARVAM_BCP47_MAP = {
 
     "hi": "hi-IN",
@@ -495,10 +494,8 @@ def classify_indic_language(
     hint_lang: Optional[str] = None
 ):
 
-    normalized_hint = (
-        normalize_lang_code(
-            hint_lang
-        )
+    normalized_hint = normalize_lang_code(
+        hint_lang
     )
 
 
@@ -526,9 +523,7 @@ def classify_indic_language(
     )
 
 
-    # --------------------------------------------------------
     # Odia
-    # --------------------------------------------------------
 
     if re.search(
         r"[\u0B00-\u0B7F]",
@@ -538,9 +533,7 @@ def classify_indic_language(
         return "or"
 
 
-    # --------------------------------------------------------
     # Tamil
-    # --------------------------------------------------------
 
     if re.search(
         r"[\u0B80-\u0BFF]",
@@ -550,9 +543,7 @@ def classify_indic_language(
         return "ta"
 
 
-    # --------------------------------------------------------
     # Telugu
-    # --------------------------------------------------------
 
     if re.search(
         r"[\u0C00-\u0C7F]",
@@ -562,9 +553,7 @@ def classify_indic_language(
         return "te"
 
 
-    # --------------------------------------------------------
     # Kannada
-    # --------------------------------------------------------
 
     if re.search(
         r"[\u0C80-\u0CFF]",
@@ -574,9 +563,7 @@ def classify_indic_language(
         return "kn"
 
 
-    # --------------------------------------------------------
     # Malayalam
-    # --------------------------------------------------------
 
     if re.search(
         r"[\u0D00-\u0D7F]",
@@ -586,9 +573,7 @@ def classify_indic_language(
         return "ml"
 
 
-    # --------------------------------------------------------
     # Gujarati
-    # --------------------------------------------------------
 
     if re.search(
         r"[\u0A80-\u0AFF]",
@@ -598,9 +583,7 @@ def classify_indic_language(
         return "gu"
 
 
-    # --------------------------------------------------------
     # Punjabi
-    # --------------------------------------------------------
 
     if re.search(
         r"[\u0A00-\u0A7F]",
@@ -610,9 +593,7 @@ def classify_indic_language(
         return "pa"
 
 
-    # --------------------------------------------------------
     # Urdu
-    # --------------------------------------------------------
 
     if re.search(
         r"[\u0600-\u06FF]",
@@ -622,9 +603,7 @@ def classify_indic_language(
         return "ur"
 
 
-    # --------------------------------------------------------
     # Bengali / Assamese
-    # --------------------------------------------------------
 
     if re.search(
         r"[\u0980-\u09FF]",
@@ -658,16 +637,14 @@ def classify_indic_language(
         return "bn"
 
 
-    # --------------------------------------------------------
     # Devanagari
-    # --------------------------------------------------------
 
     if re.search(
         r"[\u0900-\u097F]",
         cleaned
     ):
 
-        # Marathi indicators
+        # Marathi
 
         if "ळ" in cleaned:
 
@@ -688,7 +665,7 @@ def classify_indic_language(
             return "mr"
 
 
-        # Sanskrit indicators
+        # Sanskrit
 
         if (
             "ः" in cleaned
@@ -705,7 +682,7 @@ def classify_indic_language(
             return "sa"
 
 
-        # Nepali indicators
+        # Nepali
 
         if any(
             phrase in cleaned
@@ -726,7 +703,7 @@ def classify_indic_language(
 
 
 # ============================================================
-# INPUT SANITIZATION
+# QUERY SANITIZATION
 # ============================================================
 
 def sanitize_query(
@@ -738,17 +715,15 @@ def sanitize_query(
         return ""
 
 
-    query = str(query).strip()
+    query = str(
+        query
+    ).strip()
 
-
-    # Prevent absurdly large requests
 
     if len(query) > 1000:
 
         query = query[:1000]
 
-
-    # Remove control characters
 
     query = "".join(
         c
@@ -762,7 +737,7 @@ def sanitize_query(
 
 
 # ============================================================
-# BASIC SAFETY GUARDRAIL
+# SAFETY GUARDRAIL
 # ============================================================
 
 UNSAFE_PATTERNS = [
@@ -775,6 +750,7 @@ UNSAFE_PATTERNS = [
     r"\bsteal passwords\b",
     r"\bhack someone's account\b",
     r"\bhow to hack\b"
+
 ]
 
 
@@ -806,20 +782,6 @@ def encode_query(
     query: str
 ):
 
-    # --------------------------------------------------------
-    # IMPORTANT:
-    #
-    # The FAISS index was generated with:
-    #
-    # passage: <document>
-    #
-    # E5 expects:
-    #
-    # query: <question>
-    #
-    # Therefore we MUST use the query prefix here.
-    # --------------------------------------------------------
-
     formatted_query = (
         "query: "
         + query.strip()
@@ -829,20 +791,43 @@ def encode_query(
     start = time.perf_counter()
 
 
+    # IMPORTANT:
+    # batch_size=1 because we only embed one query.
+    #
+    # This avoids unnecessary memory allocation.
+
     embeddings = embedding_model.encode(
+
         [formatted_query],
+
+        batch_size=1,
+
         normalize_embeddings=True,
-        convert_to_numpy=True
+
+        convert_to_numpy=True,
+
+        show_progress_bar=False
     )
 
 
     embedding = np.asarray(
         embeddings[0],
-        dtype="float32"
+        dtype=np.float32
     )
 
 
-    # Extra normalization for safety.
+    # Ensure correct dimension
+
+    if embedding.shape[0] != index.d:
+
+        raise RuntimeError(
+            "Embedding dimension mismatch: "
+            f"model={embedding.shape[0]}, "
+            f"FAISS={index.d}"
+        )
+
+
+    # Normalize
 
     norm = np.linalg.norm(
         embedding
@@ -929,7 +914,7 @@ def remove_duplicate_results(
 
 
 # ============================================================
-# MULTI-STAGE RETRIEVAL
+# RETRIEVAL
 # ============================================================
 
 def retrieve_passages(
@@ -938,41 +923,33 @@ def retrieve_passages(
     target_lang: Optional[str] = None
 ):
 
-    pipeline_start = (
-        time.perf_counter()
+    pipeline_start = time.perf_counter()
+
+
+    # --------------------------------------------------------
+    # Language
+    # --------------------------------------------------------
+
+    effective_lang = classify_indic_language(
+        query,
+        target_lang
     )
 
 
     # --------------------------------------------------------
-    # Stage 1 — language detection
+    # Embedding
     # --------------------------------------------------------
 
-    effective_lang = (
-        classify_indic_language(
-            query,
-            target_lang
-        )
+    query_vector, embedding_ms = encode_query(
+        query
     )
 
 
     # --------------------------------------------------------
-    # Stage 2 — semantic embedding
+    # FAISS
     # --------------------------------------------------------
 
-    query_vector, embedding_ms = (
-        encode_query(
-            query
-        )
-    )
-
-
-    # --------------------------------------------------------
-    # Stage 3 — broad vector retrieval
-    # --------------------------------------------------------
-
-    search_start = (
-        time.perf_counter()
-    )
+    search_start = time.perf_counter()
 
 
     scores, indices = index.search(
@@ -996,7 +973,7 @@ def retrieve_passages(
 
 
     # --------------------------------------------------------
-    # Stage 4 — metadata-aware filtering
+    # Metadata filtering
     # --------------------------------------------------------
 
     for score, idx in zip(
@@ -1044,10 +1021,11 @@ def retrieve_passages(
 
         item = {
 
-            "score": round(
-                float(score),
-                4
-            ),
+            "score":
+                round(
+                    float(score),
+                    4
+                ),
 
             "language":
                 doc_language
@@ -1079,24 +1057,20 @@ def retrieve_passages(
 
 
     # --------------------------------------------------------
-    # Stage 5 — language preference
+    # Language preference
     # --------------------------------------------------------
 
     if language_matches:
 
-        candidates = (
-            language_matches
-        )
+        candidates = language_matches
 
     else:
 
-        candidates = (
-            global_matches
-        )
+        candidates = global_matches
 
 
     # --------------------------------------------------------
-    # Stage 6 — score filtering
+    # Score filtering
     # --------------------------------------------------------
 
     candidates = [
@@ -1107,22 +1081,21 @@ def retrieve_passages(
 
         if item["score"]
         >= GROUNDING_THRESHOLD
+
     ]
 
 
     # --------------------------------------------------------
-    # Stage 7 — duplicate removal
+    # Duplicate removal
     # --------------------------------------------------------
 
-    candidates = (
-        remove_duplicate_results(
-            candidates
-        )
+    candidates = remove_duplicate_results(
+        candidates
     )
 
 
     # --------------------------------------------------------
-    # Stage 8 — final top-k
+    # Top K
     # --------------------------------------------------------
 
     candidates.sort(
@@ -1171,7 +1144,7 @@ def retrieve_passages(
 
 
 # ============================================================
-# ANSWER GENERATION
+# GROUNDED ANSWER
 # ============================================================
 
 def generate_grounded_answer(
@@ -1236,10 +1209,6 @@ def generate_grounded_answer(
         }
 
 
-    # --------------------------------------------------------
-    # Extractive grounded generation
-    # --------------------------------------------------------
-
     sentences = re.split(
         r"(?<=[.!?।])\s+",
         text
@@ -1268,7 +1237,7 @@ def generate_grounded_answer(
 
 
 # ============================================================
-# REQUEST MODELS
+# REQUEST MODEL
 # ============================================================
 
 class QueryRequest(BaseModel):
@@ -1279,7 +1248,7 @@ class QueryRequest(BaseModel):
 
 
 # ============================================================
-# LATENCY TRACKING
+# LATENCY
 # ============================================================
 
 def record_latency(
@@ -1316,6 +1285,7 @@ def percentile(
         index_position
     )
 
+
     upper = min(
         lower + 1,
         len(ordered) - 1
@@ -1338,7 +1308,7 @@ def percentile(
 
 
 # ============================================================
-# HEALTH CHECK
+# ROOT HEALTH
 # ============================================================
 
 @app.get("/")
@@ -1348,7 +1318,31 @@ def health_check():
 
         "status":
             "online",
+
+        "service":
+            "RAG-in-Goa",
+
+        "vectors_indexed":
+            int(index.ntotal),
+
+        "embedding_dimension":
+            int(index.d),
+
+        "embedding_model":
+            MODEL_NAME,
+
+        "embedding_backend":
+            "sentence-transformers-onnx",
+
+        "endpoints":
+            [
+                "/api/ask",
+                "/api/voice-ask",
+                "/api/analytics",
+                "/api/health"
+            ]
     }
+
 
 # ============================================================
 # HEALTH API
@@ -1378,7 +1372,7 @@ def api_health():
             MODEL_NAME,
 
         "embedding_backend":
-            "sentence-transformers",
+            "sentence-transformers-onnx",
 
         "sarvam_configured":
             bool(SARVAM_API_KEY)
@@ -1394,13 +1388,11 @@ def process_text_query(
     req: QueryRequest
 ):
 
-    request_start = (
-        time.perf_counter()
-    )
+    request_start = time.perf_counter()
 
 
     # --------------------------------------------------------
-    # Input guardrail
+    # Sanitize
     # --------------------------------------------------------
 
     query = sanitize_query(
@@ -1415,6 +1407,10 @@ def process_text_query(
             detail="Query cannot be empty."
         )
 
+
+    # --------------------------------------------------------
+    # Safety
+    # --------------------------------------------------------
 
     if not safety_check(
         query
@@ -1433,12 +1429,13 @@ def process_text_query(
     # Retrieval
     # --------------------------------------------------------
 
-    retrieval = (
-        retrieve_passages(
-            query=query,
-            top_k=TOP_K,
-            target_lang=req.language
-        )
+    retrieval = retrieve_passages(
+
+        query=query,
+
+        top_k=TOP_K,
+
+        target_lang=req.language
     )
 
 
@@ -1448,14 +1445,14 @@ def process_text_query(
 
 
     # --------------------------------------------------------
-    # Grounded answer generation
+    # Grounded answer
     # --------------------------------------------------------
 
-    generated = (
-        generate_grounded_answer(
-            query,
-            passages
-        )
+    generated = generate_grounded_answer(
+
+        query,
+
+        passages
     )
 
 
@@ -1470,7 +1467,7 @@ def process_text_query(
     )
 
 
-    result = {
+    return {
 
         "query":
             query,
@@ -1519,12 +1516,6 @@ def process_text_query(
     }
 
 
-    gc.collect()
-
-
-    return result
-
-
 # ============================================================
 # SARVAM STT
 # ============================================================
@@ -1546,10 +1537,8 @@ def transcribe_with_sarvam(
         )
 
 
-    normalized_language = (
-        normalize_lang_code(
-            language
-        )
+    normalized_language = normalize_lang_code(
+        language
     )
 
 
@@ -1597,9 +1586,7 @@ def transcribe_with_sarvam(
     }
 
 
-    start = (
-        time.perf_counter()
-    )
+    start = time.perf_counter()
 
 
     try:
@@ -1621,7 +1608,9 @@ def transcribe_with_sarvam(
     except requests.Timeout:
 
         raise HTTPException(
+
             status_code=504,
+
             detail=(
                 "Sarvam speech recognition timed out."
             )
@@ -1636,7 +1625,9 @@ def transcribe_with_sarvam(
         )
 
         raise HTTPException(
+
             status_code=502,
+
             detail=(
                 "Sarvam speech recognition failed."
             )
@@ -1657,7 +1648,9 @@ def transcribe_with_sarvam(
         )
 
         raise HTTPException(
+
             status_code=502,
+
             detail=(
                 "Sarvam speech-to-text request failed."
             )
@@ -1671,7 +1664,9 @@ def transcribe_with_sarvam(
     except Exception:
 
         raise HTTPException(
+
             status_code=502,
+
             detail=(
                 "Invalid response from Sarvam."
             )
@@ -1699,7 +1694,9 @@ def transcribe_with_sarvam(
     if not transcript:
 
         raise HTTPException(
+
             status_code=400,
+
             detail=(
                 "Could not transcribe audio."
             )
@@ -1736,13 +1733,11 @@ async def process_voice_query(
     )
 ):
 
-    pipeline_start = (
-        time.perf_counter()
-    )
+    pipeline_start = time.perf_counter()
 
 
     # --------------------------------------------------------
-    # Audio validation
+    # Audio
     # --------------------------------------------------------
 
     audio_data = await file.read()
@@ -1751,7 +1746,9 @@ async def process_voice_query(
     if not audio_data:
 
         raise HTTPException(
+
             status_code=400,
+
             detail="Empty audio file."
         )
 
@@ -1764,7 +1761,9 @@ async def process_voice_query(
     if len(audio_data) > MAX_AUDIO_SIZE:
 
         raise HTTPException(
+
             status_code=413,
+
             detail=(
                 "Audio file exceeds "
                 "the 10 MB limit."
@@ -1784,7 +1783,7 @@ async def process_voice_query(
 
 
     # --------------------------------------------------------
-    # Content type
+    # Audio type
     # --------------------------------------------------------
 
     if lower_filename.endswith(
@@ -1864,28 +1863,32 @@ async def process_voice_query(
 
 
     detected_language = (
+
         normalize_lang_code(
+
             stt[
                 "detected_language"
             ]
         )
+
         or
+
         classify_indic_language(
+
             transcript,
+
             language
         )
     )
 
 
-    # Release audio memory.
+    # Release audio memory
 
     del audio_data
 
-    gc.collect()
-
 
     # --------------------------------------------------------
-    # Safety guardrail
+    # Safety
     # --------------------------------------------------------
 
     if not safety_check(
@@ -1893,7 +1896,9 @@ async def process_voice_query(
     ):
 
         raise HTTPException(
+
             status_code=400,
+
             detail=(
                 "The transcribed query is not "
                 "supported by the system safety policy."
@@ -1902,15 +1907,16 @@ async def process_voice_query(
 
 
     # --------------------------------------------------------
-    # RAG
+    # Retrieval
     # --------------------------------------------------------
 
-    retrieval = (
-        retrieve_passages(
-            query=transcript,
-            top_k=TOP_K,
-            target_lang=detected_language
-        )
+    retrieval = retrieve_passages(
+
+        query=transcript,
+
+        top_k=TOP_K,
+
+        target_lang=detected_language
     )
 
 
@@ -1923,11 +1929,11 @@ async def process_voice_query(
     # Grounded answer
     # --------------------------------------------------------
 
-    generated = (
-        generate_grounded_answer(
-            transcript,
-            passages
-        )
+    generated = generate_grounded_answer(
+
+        transcript,
+
+        passages
     )
 
 
@@ -1942,7 +1948,7 @@ async def process_voice_query(
     )
 
 
-    result = {
+    return {
 
         "query":
             transcript,
@@ -2001,12 +2007,6 @@ async def process_voice_query(
     }
 
 
-    gc.collect()
-
-
-    return result
-
-
 # ============================================================
 # LATENCY ANALYTICS
 # ============================================================
@@ -2029,6 +2029,16 @@ def latency_analytics():
             "message":
                 "No requests measured yet."
         }
+
+
+    under_200 = sum(
+
+        1
+
+        for value in values
+
+        if value < 200
+    )
 
 
     return {
@@ -2082,20 +2092,12 @@ def latency_analytics():
             200,
 
         "samples_under_200ms":
-            sum(
-                1
-                for value in values
-                if value < 200
-            ),
+            under_200,
 
         "percentage_under_200ms":
             round(
                 (
-                    sum(
-                        1
-                        for value in values
-                        if value < 200
-                    )
+                    under_200
                     / len(values)
                 )
                 * 100,
@@ -2105,47 +2107,8 @@ def latency_analytics():
 
 
 # ============================================================
-# STARTUP WARMUP
+# ENGINE READY
 # ============================================================
-
-print()
-
-print(
-    "Running embedding warmup..."
-)
-
-
-try:
-
-    warmup_start = (
-        time.perf_counter()
-    )
-
-
-    _ = encode_query(
-        "What is a corporation?"
-    )
-
-
-    warmup_ms = (
-        time.perf_counter()
-        - warmup_start
-    ) * 1000
-
-
-    print(
-        f"Warmup complete: "
-        f"{warmup_ms:.2f} ms"
-    )
-
-
-except Exception as e:
-
-    print(
-        "Warmup failed:",
-        repr(e)
-    )
-
 
 print()
 
@@ -2170,7 +2133,7 @@ print(
 )
 
 print(
-    "Embedding backend: SentenceTransformers"
+    "Embedding backend: SentenceTransformers ONNX"
 )
 
 print(
