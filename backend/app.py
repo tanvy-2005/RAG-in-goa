@@ -6,6 +6,9 @@ os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["ORT_INTRA_OP_NUM_THREADS"] = "1"
 os.environ["ORT_INTER_OP_NUM_THREADS"] = "1"
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+import resource
+print("RAM before model loading:")
+print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, "MB")
 import re
 import json
 import time
@@ -317,14 +320,12 @@ print(
     f"Loading multilingual embedding model: "
     f"{MODEL_NAME}"
 )
-
 try:
     embedding_model = SentenceTransformer(
     MODEL_NAME,
     backend="onnx",
     model_kwargs={
-        "file_name": "onnx/model_qint8_avx512_vnni.onnx",
-        "provider": "CPUExecutionProvider",
+        "file_name": "onnx/model_qint8_avx512_vnni.onnx"
     }
 )
     
