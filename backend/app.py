@@ -342,12 +342,6 @@ try:
         },
         device="cpu"
     )
-
-print(
-    f"RAM AFTER MODEL: "
-    f"{process.memory_info().rss / 1024 / 1024:.1f} MB"
-)
-
     print(
      "Embedding model loaded successfully."
     )
