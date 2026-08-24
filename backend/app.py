@@ -323,11 +323,14 @@ print(
 )
 
 try:
-
     embedding_model = SentenceTransformer(
-        MODEL_NAME
-    )
-
+    MODEL_NAME,
+    backend="onnx",
+    model_kwargs={
+        "file_name": "onnx/model_qint8_avx512_vnni.onnx"
+    }
+)
+    
     print(
         "Embedding model loaded successfully."
     )
@@ -1347,44 +1350,7 @@ def health_check():
 
         "status":
             "online",
-
-        "service":
-            "RAG-in-Goa",
-
-        "task":
-            "HH Goa 2026 Task 2",
-
-        "pipeline":
-            [
-                "voice-input",
-                "Sarvam-STT",
-                "language-detection",
-                "semantic-retrieval",
-                "metadata-aware-filtering",
-                "grounded-answer-generation"
-            ],
-
-        "vectors_indexed":
-            int(index.ntotal),
-
-        "embedding_dimension":
-            int(index.d),
-
-        "embedding_model":
-            MODEL_NAME,
-
-        "embedding_backend":
-            "sentence-transformers",
-
-        "endpoints":
-            [
-                "/api/ask",
-                "/api/voice-ask",
-                "/api/analytics",
-                "/api/health"
-            ]
     }
-
 
 # ============================================================
 # HEALTH API

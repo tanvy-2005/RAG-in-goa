@@ -62,7 +62,15 @@ embeddings = np.array(embeddings, dtype=np.float32)
 dimension = embeddings.shape[1]
 
 print("\nBuilding FAISS IndexFlatIP...")
-index = faiss.IndexFlatIP(dimension)
+index = faiss.IndexHNSWFlat(
+    dimension,
+    32,
+    faiss.METRIC_INNER_PRODUCT
+)
+
+index.hnsw.efConstruction = 100
+index.hnsw.efSearch = 32
+
 index.add(embeddings)
 
 faiss.write_index(index, INDEX_OUTPUT)
