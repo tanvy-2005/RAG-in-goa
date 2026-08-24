@@ -1,4 +1,11 @@
 import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["ORT_INTRA_OP_NUM_THREADS"] = "1"
+os.environ["ORT_INTER_OP_NUM_THREADS"] = "1"
+os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 import re
 import json
 import time
@@ -27,17 +34,6 @@ from pydantic import BaseModel
 # ============================================================
 
 from sentence_transformers import SentenceTransformer
-
-
-# ============================================================
-# MEMORY / PERFORMANCE CONFIGURATION
-# ============================================================
-
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-
 
 # ============================================================
 # ENVIRONMENT VARIABLES
@@ -327,7 +323,8 @@ try:
     MODEL_NAME,
     backend="onnx",
     model_kwargs={
-        "file_name": "onnx/model_qint8_avx512_vnni.onnx"
+        "file_name": "onnx/model_qint8_avx512_vnni.onnx",
+        "provider": "CPUExecutionProvider",
     }
 )
     
