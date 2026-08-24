@@ -7,3 +7,4 @@ onnxruntime
 optimum
 requests
 python-multipart
+psutil

@@ -17,6 +17,13 @@ os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 
 # Prevent unnecessary tokenizer/model parallelism
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+import psutil
+process = psutil.Process(os.getpid())
+
+print(
+    f"RAM BEFORE MODEL: "
+    f"{process.memory_info().rss / 1024 / 1024:.1f} MB"
+)
 
 
 # ============================================================
@@ -336,9 +343,13 @@ try:
         device="cpu"
     )
 
+print(
+    f"RAM AFTER MODEL: "
+    f"{process.memory_info().rss / 1024 / 1024:.1f} MB"
+)
 
     print(
-        "Embedding model loaded successfully."
+     "Embedding model loaded successfully."
     )
 
 
