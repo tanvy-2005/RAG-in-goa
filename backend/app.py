@@ -337,13 +337,14 @@ try:
         MODEL_NAME,
         backend="onnx",
         model_kwargs={
-            "file_name":
-                "onnx/model_qint8_avx512_vnni.onnx"
+            "file_name":"onnx/model_O4.onnx"
+                
         },
         device="cpu"
     )
     print(
-     "Embedding model loaded successfully."
+        f"RAM AFTER MODEL: "
+        f"{process.memory_info().rss / 1024 / 1024:.1f} MB"
     )
 
 
