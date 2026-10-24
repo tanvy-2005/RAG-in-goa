@@ -1,5 +1,6 @@
 import os
-
+from dotenv import load_dotenv
+load_dotenv()  # Load .env file from backend directory
 # ============================================================
 # MEMORY / CPU OPTIMIZATION
 # ============================================================
@@ -101,9 +102,9 @@ TOP_K = 3
 # IMPORTANT:
 # We only need a small candidate set because final output
 # contains only TOP_K results.
-SEARCH_K = 10
+SEARCH_K = 20
 
-GROUNDING_THRESHOLD = 0.35
+GROUNDING_THRESHOLD = 0.55
 
 MAX_CACHE_SIZE = 50
 
@@ -1548,12 +1549,9 @@ def transcribe_with_sarvam(
     )
 
 
-    sarvam_language = (
-        SARVAM_BCP47_MAP.get(
-            normalized_language,
-            "unknown"
-        )
-    )
+    sarvam_language = SARVAM_BCP47_MAP.get(
+        normalized_language
+    )  # None if not found (auto-detect)
 
 
     url = (
@@ -1579,17 +1577,15 @@ def transcribe_with_sarvam(
     }
 
 
+    # Only send language_code if we have a valid BCP-47 code.
+    # Omitting it lets Sarvam auto-detect the language.
     data = {
-
-        "model":
-            "saaras:v3",
-
-        "mode":
-            "transcribe",
-
-        "language_code":
-            sarvam_language
+        "model": "saaras:v3",
+        "mode": "transcribe",
     }
+
+    if sarvam_language:
+        data["language_code"] = sarvam_language
 
 
     start = time.perf_counter()
@@ -1648,9 +1644,11 @@ def transcribe_with_sarvam(
 
     if response.status_code != 200:
 
+        sarvam_error = response.text[:500]
+
         print(
-            "[Sarvam Error]",
-            response.text[:500]
+            f"[Sarvam Error] HTTP {response.status_code}:",
+            sarvam_error
         )
 
         raise HTTPException(
@@ -1658,7 +1656,8 @@ def transcribe_with_sarvam(
             status_code=502,
 
             detail=(
-                "Sarvam speech-to-text request failed."
+                f"Sarvam STT failed (HTTP {response.status_code}): "
+                f"{sarvam_error}"
             )
         )
 
@@ -1802,6 +1801,18 @@ async def process_voice_query(
 
 
     elif lower_filename.endswith(
+        ".mpeg"
+    ) or lower_filename.endswith(
+        ".mpga"
+    ):
+
+        # OS/browser often tags .mpeg as video/mpeg — force audio/mpeg
+        filename = "audio.mp3"
+
+        content_type = "audio/mpeg"
+
+
+    elif lower_filename.endswith(
         ".wav"
     ):
 
@@ -1837,13 +1848,34 @@ async def process_voice_query(
         content_type = "audio/mp4"
 
 
+    elif lower_filename.endswith(
+        ".aac"
+    ):
+
+        filename = "audio.aac"
+
+        content_type = "audio/aac"
+
+
+    elif lower_filename.endswith(
+        ".flac"
+    ):
+
+        filename = "audio.flac"
+
+        content_type = "audio/flac"
+
+
     else:
 
         filename = "audio.wav"
 
+        # Never forward video/* content types to Sarvam
+        raw_ct = file.content_type or "audio/wav"
         content_type = (
-            file.content_type
-            or "audio/wav"
+            raw_ct
+            if raw_ct.startswith("audio/")
+            else "audio/wav"
         )
 
 
@@ -1990,6 +2022,12 @@ async def process_voice_query(
             retrieval["vector_search_ms"],
 
         "audio_pipeline_total_ms":
+            round(
+                total_ms,
+                2
+            ),
+
+        "latency_ms":
             round(
                 total_ms,
                 2

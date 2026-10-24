@@ -143,6 +143,10 @@ function App() {
         body: JSON.stringify({ query: text, language }),
       });
 
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `Server error: ${res.status}`);
+      }
 
       const data: RAGResponse = await res.json();
 
@@ -150,7 +154,7 @@ function App() {
       const aiMsg: Message = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        content: data.answer,
+        content: data.answer || '(No answer returned)',
         timestamp: new Date(),
         passages: data.passages,
         latencyMs: data.latency_ms,
@@ -178,7 +182,7 @@ function App() {
       const errorMsg: Message = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        content: "I encountered an error trying to connect to the server. Please try again.",
+        content: error instanceof Error ? error.message : "I encountered an error trying to connect to the server. Please try again.",
         timestamp: new Date(),
       };
       setMessages(prev => [...prev, errorMsg]);
@@ -210,6 +214,10 @@ function App() {
         body: formData,
       });
 
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `Server error: ${res.status}`);
+      }
 
       const data: RAGResponse = await res.json();
 
@@ -217,7 +225,7 @@ function App() {
       const aiMsg: Message = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        content: data.answer,
+        content: data.answer || '(No answer returned)',
         timestamp: new Date(),
         passages: data.passages,
         latencyMs: data.latency_ms,
@@ -248,7 +256,7 @@ function App() {
       const errorMsg: Message = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        content: "I encountered an error trying to process the audio file. Please try again.",
+        content: error instanceof Error ? error.message : "I encountered an error trying to process the audio file. Please try again.",
         timestamp: new Date(),
       };
       setMessages(prev => [...prev, errorMsg]);

@@ -157,7 +157,7 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({ message }) => {
 
           <div className="text-[15px] text-white leading-relaxed prose prose-invert max-w-none">
 
-            {message.content.split('\n').map((line, i) => (
+            {(message.content || '').split('\n').map((line, i) => (
 
               <span key={i}>
 

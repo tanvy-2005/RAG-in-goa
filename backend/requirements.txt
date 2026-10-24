@@ -8,3 +8,4 @@ optimum
 requests
 python-multipart
 psutil
+python-dotenv
